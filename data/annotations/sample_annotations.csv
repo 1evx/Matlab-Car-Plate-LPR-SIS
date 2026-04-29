@@ -1,0 +1,6 @@
+image_name,vehicle_type,plate_category,expected_text,expected_state,bbox_x,bbox_y,bbox_w,bbox_h,notes
+car_standard_day_near_001.jpg,car,state_series,BPK1234,Selangor,120,180,240,70,Clear daylight sample
+bus_state_series_shade_mid_001.jpg,bus,state_series,JDQ4567,Johor,95,160,260,78,Partial shadow
+motorcycle_federal_day_near_001.jpg,motorcycle,federal_territory,WVU8899,Kuala Lumpur,60,120,180,56,Small plate
+car_military_overcast_mid_001.jpg,car,military,Z1234,Military,140,200,210,65,Special series
+
