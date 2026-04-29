@@ -24,7 +24,7 @@ classdef TestDetection < matlab.unittest.TestCase
             testCase.verifyTrue(isfield(metadata.candidates, "characterTextureScore"));
             testCase.verifyTrue(isfield(metadata.candidates, "plateContrastScore"));
             testCase.verifyTrue(isfield(metadata.candidates, "componentAlignmentScore"));
-            testCase.verifyTrue(isfield(metadata.candidates, "vehiclePositionScore"));
+            testCase.verifyFalse(isfield(metadata.candidates, "vehiclePositionScore"));
         end
     end
 end

@@ -1,5 +1,8 @@
 function [bbox, metadata] = detectPlateRegion(grayImage, config)
-    %DETECTPLATEREGION Detect likely plate candidates and rank them late.
+    % DETECTPLATEREGION Main entry point for detecting a license plate.
+    % It enhances the image, scans across multiple scales, and runs several 
+    % detection strategies (edge, dark regions, text clusters) to find the 
+    % highest-scoring bounding box that looks like a license plate.
 
     config = validateConfig(config);
     grayImage = im2uint8(grayImage);
@@ -11,6 +14,7 @@ function [bbox, metadata] = detectPlateRegion(grayImage, config)
     candidateRecords = localEmptyCandidateRecords();
     branchMasks = localInitializeBranchMasks(imageSize);
 
+    % Loop through different image scales to make detection scale-invariant
     for scale = config.detection.scales
         scaledGray = imresize(grayImage, scale, "bilinear");
         scaledEnhanced = imresize(enhancedImage, scale, "bilinear");
@@ -23,16 +27,19 @@ function [bbox, metadata] = detectPlateRegion(grayImage, config)
             scaledGray, grayImage, config, scale);
         [textRecords, textMask] = localGenerateTextClusterCandidates( ...
             scaledGray, grayImage, config, scale);
+        [mserRecords, mserMask] = localGenerateMserCandidates( ...
+            scaledGray, grayImage, config, scale);
 
         candidateRecords = localAppendBranchCandidates( ...
-            candidateRecords, edgeRecords, priorityEdgeRecords, darkRecords, textRecords);
+            candidateRecords, edgeRecords, priorityEdgeRecords, darkRecords, textRecords, mserRecords);
         branchMasks = localUpdateBranchMasks( ...
-            branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask, scale);
+            branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask, mserMask, scale);
     end
 
     candidateRecords = localSortAndPruneCandidates( ...
         candidateRecords, config.detection.maxCandidatesToKeep);
     metadata = localBuildMetadata(branchMasks, candidateRecords);
+    localShowDetectionCandidateDebug(grayImage, candidateRecords, config);
 
     if isempty(candidateRecords)
         bbox = [];
@@ -44,6 +51,9 @@ function [bbox, metadata] = detectPlateRegion(grayImage, config)
 end
 
 function branchMasks = localInitializeBranchMasks(imageSize)
+    % LOCALINITIALIZEBRANCHMASKS Creates empty logical matrices to keep track 
+    % of where potential plate regions were found during processing.
+    
     branchMasks = struct( ...
         "edgeMask", false(imageSize), ...
         "closedMask", false(imageSize), ...
@@ -53,16 +63,23 @@ function branchMasks = localInitializeBranchMasks(imageSize)
         "priorityEdgeMask", false(imageSize), ...
         "darkPlateMask", false(imageSize), ...
         "textClusterMask", false(imageSize), ...
+        "mserMask", false(imageSize), ...
         "multiScaleEdgeMask", false(imageSize));
 end
 
 function candidateRecords = localAppendBranchCandidates(candidateRecords, varargin)
+    % LOCALAPPENDBRANCHCANDIDATES Utility function to concatenate multiple arrays 
+    % of candidate structures into a single array.
+
     for i = 1:nargin - 1
         candidateRecords = [candidateRecords varargin{i}]; %#ok<AGROW>
     end
 end
 
-function branchMasks = localUpdateBranchMasks(branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask, scale)
+function branchMasks = localUpdateBranchMasks(branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask, mserMask, scale)
+    % LOCALUPDATEBRANCHMASKS Updates the debugging masks with results from 
+    % the current scale iteration.
+
     if scale == 1
         branchMasks.edgeMask = edgeDebug.edgeMask;
         branchMasks.closedMask = edgeDebug.closedMask;
@@ -70,6 +87,7 @@ function branchMasks = localUpdateBranchMasks(branchMasks, edgeDebug, priorityEd
         branchMasks.dilatedMask = edgeDebug.dilatedMask;
         branchMasks.plateMask = edgeDebug.plateMask;
         branchMasks.priorityEdgeMask = priorityEdgeDebug.plateMask;
+        branchMasks.mserMask = branchMasks.mserMask | mserMask;
     else
         branchMasks.multiScaleEdgeMask = branchMasks.multiScaleEdgeMask | ...
             edgeDebug.plateMask | priorityEdgeDebug.plateMask;
@@ -80,6 +98,9 @@ function branchMasks = localUpdateBranchMasks(branchMasks, edgeDebug, priorityEd
 end
 
 function metadata = localBuildMetadata(branchMasks, candidateRecords)
+    % LOCALBUILDMETADATA Packages the masks, candidates, and top scores 
+    % into a struct for debugging, visualization, or external logging.
+
     if isempty(candidateRecords)
         topCandidates = candidateRecords;
         componentCount = 0;
@@ -99,6 +120,7 @@ function metadata = localBuildMetadata(branchMasks, candidateRecords)
         "priorityEdgeMask", branchMasks.priorityEdgeMask, ...
         "darkPlateMask", branchMasks.darkPlateMask, ...
         "textClusterMask", branchMasks.textClusterMask, ...
+        "mserMask", branchMasks.mserMask, ...
         "multiScaleEdgeMask", branchMasks.multiScaleEdgeMask, ...
         "candidates", {candidateRecords}, ...
         "topCandidates", {topCandidates}, ...
@@ -108,6 +130,10 @@ end
 
 function [candidateRecords, debug] = localGenerateEdgeCandidates( ...
         scaledGray, scaledEnhanced, originalGray, config, scale, usePriorityRoi)
+
+    % LOCALGENERATEEDGECANDIDATES Finds license plate candidates by looking 
+    % for regions with high edge density (which happens where text is).
+    % Uses morphological operations to cluster edges into solid rectangles.
 
     edgeMask = edge(scaledEnhanced, config.detection.edgeMethod);
     branchName = "edge_full";
@@ -135,6 +161,8 @@ end
 
 function [candidateRecords, mappedMask] = localGenerateDarkCandidates( ...
         scaledGray, originalGray, config, scale)
+    % LOCALGENERATEDARKCANDIDATES Looks for license plates that appear as 
+    % distinct dark rectangles against a lighter car body.
 
     roiBox = localPriorityBox(size(scaledGray), config);
     mask = false(size(scaledGray));
@@ -157,6 +185,8 @@ end
 
 function [candidateRecords, mappedMask] = localGenerateTextClusterCandidates( ...
         scaledGray, originalGray, config, scale)
+    % LOCALGENERATETEXTCLUSTERCANDIDATES Targets high-contrast text regions 
+    % by aggressively applying adaptive thresholding to find characters.
 
     roiBox = localPriorityBox(size(scaledGray), config);
     mask = false(size(scaledGray));
@@ -179,8 +209,74 @@ function [candidateRecords, mappedMask] = localGenerateTextClusterCandidates( ..
     mappedMask = localMapMaskToOriginal(mask, size(originalGray));
 end
 
+function [candidateRecords, mappedMask] = localGenerateMserCandidates( ...
+        scaledGray, originalGray, config, scale)
+
+    candidateRecords = localEmptyCandidateRecords();
+    mappedMask = false(size(originalGray));
+
+    if ~isfield(config.detection, "mserEnabled") || ~config.detection.mserEnabled
+        return;
+    end
+    if ~exist("detectMSERFeatures", "file")
+        return;
+    end
+
+    mserRegions = detectMSERFeatures(scaledGray, ...
+        "RegionAreaRange", [config.detection.mserMinAreaPixels config.detection.mserMaxAreaPixels]);
+    if mserRegions.Count == 0
+        return;
+    end
+
+    markerMask = false(size(scaledGray));
+    regionLocations = round(mserRegions.Location);
+    regionLocations(:, 1) = max(1, min(size(markerMask, 2), regionLocations(:, 1)));
+    regionLocations(:, 2) = max(1, min(size(markerMask, 1), regionLocations(:, 2)));
+    linearIdx = sub2ind(size(markerMask), regionLocations(:, 2), regionLocations(:, 1));
+    markerMask(linearIdx) = true;
+
+    markerMask = imdilate(markerMask, strel("rectangle", [3 3]));
+    mserMask = imclose(markerMask, strel("rectangle", [5 17]));
+    mserMask = imdilate(mserMask, strel("rectangle", [3 11]));
+    mserMask = bwareaopen(mserMask, config.detection.minCandidateAreaPixels);
+    mserMask = localFilterMserMaskByAspect(mserMask, config);
+
+    candidateRecords = localBuildCandidatesFromMask( ...
+        mserMask, scaledGray, originalGray, config, scale, "mser_text");
+    mappedMask = localMapMaskToOriginal(mserMask, size(originalGray));
+end
+
+function filteredMask = localFilterMserMaskByAspect(mask, config)
+    % LOCALFILTERMSERMASKBYASPECT Filters MSER regions based on their aspect ratio.
+
+    filteredMask = false(size(mask));
+    stats = regionprops("table", mask, "BoundingBox", "Area");
+    for i = 1:height(stats)
+        box = stats.BoundingBox(i, :);
+        aspectRatio = box(3) / max(box(4), eps);
+        if aspectRatio >= config.detection.mserMinAspectRatio && ...
+                aspectRatio <= config.detection.mserMaxAspectRatio
+            componentMask = false(size(mask));
+            componentMask = localFillBox(componentMask, box);
+            filteredMask = filteredMask | componentMask;
+        end
+    end
+end
+
+function mask = localFillBox(mask, box)
+    % LOCALFILLBOX Sets the pixels within a bounding box to true in a logical mask.
+
+    x1 = max(1, floor(box(1)));
+    y1 = max(1, floor(box(2)));
+    x2 = min(size(mask, 2), ceil(box(1) + box(3) - 1));
+    y2 = min(size(mask, 1), ceil(box(2) + box(4) - 1));
+    mask(y1:y2, x1:x2) = true;
+end
+
 function candidateRecords = localBuildCandidatesFromMask( ...
         mask, scaledGray, originalGray, config, scale, branchName)
+    % LOCALBUILDCANDIDATESFROMMASK Extracts bounding boxes from binary masks, 
+    % translates them to the original image coordinates, and grades them.
 
     stats = regionprops( ...
         "table", mask, scaledGray, "BoundingBox", "Area", "Extent", "Solidity", "MeanIntensity");
@@ -193,7 +289,7 @@ function candidateRecords = localBuildCandidatesFromMask( ...
         end
 
         mappedBox = localMapBoxToOriginal(stats.BoundingBox(i, :), scale, size(originalGray));
-        mappedBox = localExpandCandidateBoxForBranch(mappedBox, branchName, size(originalGray));
+        mappedBox = localExpandCandidateBoxForBranch(mappedBox, branchName, size(originalGray), config);
 
         candidateMask = imcrop(mappedMask, mappedBox);
         candidateImage = imcrop(originalGray, mappedBox);
@@ -209,17 +305,25 @@ function candidateRecords = localBuildCandidatesFromMask( ...
     end
 end
 
-function mappedBox = localExpandCandidateBoxForBranch(mappedBox, branchName, imageSize)
+function mappedBox = localExpandCandidateBoxForBranch(mappedBox, branchName, imageSize, config)
+    % LOCALEXPANDCANDIDATEBOXFORBRANCH Certain detection algorithms typically 
+    % underestimate the plate size, so this manually inflates the box.
+
     switch string(branchName)
         case "text_priority"
             mappedBox = localExpandCandidateBox(mappedBox, [1.70 2.20], imageSize);
         case "dark_priority"
             mappedBox = localExpandCandidateBox(mappedBox, [1.25 1.35], imageSize);
+        case "mser_text"
+            mappedBox = localExpandCandidateBox(mappedBox, config.detection.mserExpand, imageSize); 
     end
 end
 
 function [candidateRecord, isValid] = localScoreCandidate( ...
-        bbox, candidateMask, candidateImage, originalImageSize, branchName, scale, config)
+    bbox, candidateMask, candidateImage, originalImageSize, branchName, scale, config)
+    % LOCALSCORECANDIDATE The core evaluation function. It checks if the candidate 
+    % meets strict geometric constraints (aspect ratio, width, height) and then 
+    % scores it based on texture, contrast, and shape.
 
     fullImageHeight = originalImageSize(1);
     fullImageWidth = originalImageSize(2);
@@ -228,9 +332,6 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
     widthRatio = bbox(3) / max(fullImageWidth, eps);
     heightRatio = bbox(4) / max(fullImageHeight, eps);
     aspectRatio = bbox(3) / max(bbox(4), eps);
-    verticalCenterRatio = (bbox(2) + bbox(4) / 2) / max(fullImageHeight, eps);
-    horizontalCenterRatio = (bbox(1) + bbox(3) / 2) / max(fullImageWidth, eps);
-
     plateFeatures = extractPlateFeatures(candidateMask, candidateImage);
     rectangularity = plateFeatures.extent;
     solidity = plateFeatures.solidity;
@@ -248,10 +349,6 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         widthRatio <= config.detection.maxWidthRatio && ...
         heightRatio >= config.detection.minHeightRatio && ...
         heightRatio <= config.detection.maxHeightRatio && ...
-        verticalCenterRatio >= config.detection.minVerticalCenterRatio && ...
-        verticalCenterRatio <= config.detection.maxVerticalCenterRatio && ...
-        horizontalCenterRatio >= config.detection.minHorizontalCenterRatio && ...
-        horizontalCenterRatio <= config.detection.maxHorizontalCenterRatio && ...
         rectangularity >= config.detection.minExtent && ...
         solidity >= config.detection.minSolidity;
 
@@ -264,6 +361,7 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
     bestProfile = "";
     bestBreakdown = struct();
 
+    % Test against different standard plate profiles (e.g., standard vs squarish)
     for profile = config.detection.profiles
         aspectFit = localProfileFit( ...
             aspectRatio, profile.targetAspectRatio, profile.minAspectRatio, profile.maxAspectRatio);
@@ -282,22 +380,21 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
             localThresholdScore(edgeDensity, 0.04, 0.32) ...
             contrastScore ...
             characterTextureScore]);
-        locationScore = mean([ ...
-            localProfileFit(verticalCenterRatio, config.detection.targetVerticalCenterRatio, 0.42, 0.92) ...
-            localProfileFit(horizontalCenterRatio, config.detection.targetHorizontalCenterRatio, 0.12, 0.88)]);
-        vehiclePositionScore = mean([ ...
-            localProfileFit(verticalCenterRatio, 0.78, 0.48, 0.92) ...
-            localProfileFit(horizontalCenterRatio, 0.50, 0.22, 0.78)]);
         evidenceScore = mean([ ...
             characterTextureScore ...
             plateContrastScore ...
-            alignmentScore ...
-            vehiclePositionScore]);
+            alignmentScore]);
         branchScore = localBranchScore(branchName, scale);
-        finalScore = 0.24 * geometryScore + 0.10 * shapeScore + 0.14 * textureScore + ...
-            0.10 * locationScore + 0.08 * branchScore + 0.26 * evidenceScore - ...
-            0.08 * emptyRegionPenalty;
-        finalScore = max(0, min(1, finalScore));
+
+        countScore = localTextComponentCountScore(textComponentCount);
+        coverageScore = localTextCoverageScore(candidateMask);
+        splitPenalty = localSplitFragmentPenalty(candidateMask);
+
+        % Final weighted score calculation
+        finalScore = 0.21 * geometryScore + 0.09 * shapeScore + 0.12 * textureScore + ...
+            0.10 * branchScore + 0.22 * evidenceScore + ...
+            0.12 * countScore + 0.15 * coverageScore - ...
+            0.06 * emptyRegionPenalty - 0.06 * splitPenalty;
 
         if finalScore > bestScore
             bestScore = finalScore;
@@ -306,11 +403,13 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
                 "geometry", geometryScore, ...
                 "shape", shapeScore, ...
                 "texture", textureScore, ...
-                "location", locationScore, ...
-                "vehiclePosition", vehiclePositionScore, ...
                 "characterTexture", characterTextureScore, ...
                 "plateContrast", plateContrastScore, ...
                 "componentAlignment", alignmentScore, ...
+                "textCount", textComponentCount, ...
+                "countScore", countScore, ...
+                "coverageScore", coverageScore, ...
+                "splitPenalty", splitPenalty, ...
                 "emptyRegionPenalty", emptyRegionPenalty, ...
                 "branch", branchScore, ...
                 "evidence", evidenceScore, ...
@@ -335,15 +434,14 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         "characterTextureScore", characterTextureScore, ...
         "plateContrastScore", plateContrastScore, ...
         "componentAlignmentScore", alignmentScore, ...
-        "vehiclePositionScore", bestBreakdown.vehiclePosition, ...
         "textComponentCount", textComponentCount, ...
         "emptyRegionPenalty", emptyRegionPenalty, ...
-        "verticalCenterRatio", verticalCenterRatio, ...
-        "horizontalCenterRatio", horizontalCenterRatio, ...
         "scoreBreakdown", bestBreakdown);
 end
 
 function score = localBranchScore(branchName, scale)
+    % LOCALBRANCHSCORE Assigns a small bias/confidence score depending on 
+    % which detection method generated this candidate. Edge priority is highest.
     switch string(branchName)
         case "edge_priority"
             base = 1.00;
@@ -351,6 +449,8 @@ function score = localBranchScore(branchName, scale)
             base = 0.96;
         case "dark_priority"
             base = 0.93;
+        case "mser_text"
+            base = 0.98;
         otherwise
             base = 0.86;
     end
@@ -360,6 +460,9 @@ function score = localBranchScore(branchName, scale)
 end
 
 function score = localProfileFit(value, target, minValue, maxValue)
+    % LOCALPROFILEFIT Calculates how close a value is to a target profile value, 
+    % returning a high score for close matches and penalizing outliers.
+
     insideRange = value >= minValue && value <= maxValue;
     span = max(maxValue - minValue, eps);
     centerPenalty = abs(value - target) / span;
@@ -387,7 +490,66 @@ function score = localThresholdScore(value, lowTarget, highTarget)
     end
 end
 
+function score = localTextComponentCountScore(textComponentCount)
+    if textComponentCount >= 5 && textComponentCount <= 8
+        score = 1.0;
+    elseif textComponentCount >= 3 && textComponentCount <= 10
+        distance = min(abs(textComponentCount - 5), abs(textComponentCount - 8));
+        score = max(0.35, 0.90 - 0.15 * distance);
+    else
+        score = 0.10;
+    end
+end
+
+function score = localTextCoverageScore(candidateMask)
+    mask = logical(candidateMask);
+    if ~any(mask(:))
+        score = 0;
+        return;
+    end
+
+    profileX = sum(mask, 1);
+    activeCols = find(profileX > 0);
+    if isempty(activeCols)
+        score = 0;
+        return;
+    end
+
+    coverageRatio = (activeCols(end) - activeCols(1) + 1) / max(size(mask, 2), 1);
+    score = max(0, min(1, (coverageRatio - 0.25) / 0.55));
+end
+
+function penalty = localSplitFragmentPenalty(candidateMask)
+    mask = logical(candidateMask);
+    cc = bwconncomp(mask);
+    if cc.NumObjects <= 1
+        penalty = 0;
+        return;
+    end
+
+    stats = regionprops(cc, "Area");
+    areas = sort([stats.Area], "descend");
+    totalArea = sum(areas);
+    if totalArea <= 0
+        penalty = 0;
+        return;
+    end
+
+    dominantShare = areas(1) / totalArea;
+    if numel(areas) >= 2
+        secondShare = areas(2) / totalArea;
+    else
+        secondShare = 0;
+    end
+
+    penalty = max(0, min(1, 0.7 * (1 - dominantShare) + 0.3 * secondShare));
+end
+
 function candidateRecords = localSortAndPruneCandidates(candidateRecords, maxCandidatesToKeep)
+    % LOCALSORTANDPRUNECANDIDATES Performs Non-Maximum Suppression (NMS).
+    % Sorts candidates by score, then removes any lower-scoring candidates 
+    % that heavily overlap with higher-scoring ones.
+
     if isempty(candidateRecords)
         return;
     end
@@ -422,12 +584,18 @@ function candidateRecords = localSortAndPruneCandidates(candidateRecords, maxCan
 end
 
 function mask = localPriorityMask(imageSize, config)
+    % LOCALPRIORITYMASK Generates a full-image-sized binary mask where only 
+    % the priority ROI (likely area for a plate) is set to true.
+
     roiBox = localPriorityBox(imageSize, config);
     mask = false(imageSize);
     mask = localPasteRoiMask(mask, true(roiBox(4) + 1, roiBox(3) + 1), roiBox);
 end
 
 function roiBox = localPriorityBox(imageSize, config)
+    % LOCALPRIORITYBOX Converts normalized ROI coordinates from the config 
+    % into absolute pixel coordinates based on the image size.
+
     normalizedRoi = config.detection.priorityRoi;
     imageHeight = imageSize(1);
     imageWidth = imageSize(2);
@@ -440,6 +608,9 @@ function roiBox = localPriorityBox(imageSize, config)
 end
 
 function pastedMask = localPasteRoiMask(mask, roiMask, roiBox)
+    % LOCALPASTEROIMASK Inserts a smaller mask matrix into a larger 
+    % full-image mask at a specified bounding box location.
+
     pastedMask = mask;
     yIdx = roiBox(2):(roiBox(2) + size(roiMask, 1) - 1);
     xIdx = roiBox(1):(roiBox(1) + size(roiMask, 2) - 1);
@@ -449,10 +620,16 @@ function pastedMask = localPasteRoiMask(mask, roiMask, roiBox)
 end
 
 function mappedMask = localMapMaskToOriginal(mask, originalSize)
+    % LOCALMAPMASKTOORIGINAL Resizes a candidate mask generated at a different 
+    % scale back to the original image dimensions.
+
     mappedMask = imresize(logical(mask), originalSize, "nearest");
 end
 
 function mappedBox = localMapBoxToOriginal(box, scale, imageSize)
+    % LOCALMAPBOXTOORIGINAL Scales bounding box coordinates from a scaled 
+    % image back to match the original image size.
+
     if scale == 0
         mappedBox = [];
         return;
@@ -473,6 +650,9 @@ function mappedBox = localMapBoxToOriginal(box, scale, imageSize)
 end
 
 function expandedBox = localExpandCandidateBox(box, scaleFactors, imageSize)
+    % LOCALEXPANDCANDIDATEBOX Grows a bounding box outwards from its center 
+    % based on provided width and height multipliers.
+
     centerX = box(1) + box(3) / 2;
     centerY = box(2) + box(4) / 2;
     expandedWidth = box(3) * scaleFactors(1);
@@ -486,6 +666,9 @@ function expandedBox = localExpandCandidateBox(box, scaleFactors, imageSize)
 end
 
 function value = localIoU(boxA, boxB)
+    % LOCALIOU Calculates "Intersection over Union". This returns a percentage 
+    % of how much two bounding boxes overlap, used to filter out duplicates.
+
     x1 = max(boxA(1), boxB(1));
     y1 = max(boxA(2), boxB(2));
     x2 = min(boxA(1) + boxA(3), boxB(1) + boxB(3));
@@ -521,15 +704,15 @@ function records = localEmptyCandidateRecords()
         "characterTextureScore", {}, ...
         "plateContrastScore", {}, ...
         "componentAlignmentScore", {}, ...
-        "vehiclePositionScore", {}, ...
         "textComponentCount", {}, ...
         "emptyRegionPenalty", {}, ...
-        "verticalCenterRatio", {}, ...
-        "horizontalCenterRatio", {}, ...
         "scoreBreakdown", {});
 end
 
 function bbox = localPadBBox(bbox, imageSize, paddingRatio)
+    % LOCALPADBBOX Adds a final proportional margin around the best bounding box
+    % to ensure the edges of the plate arent cut off before OCR
+
     paddingX = bbox(3) * paddingRatio;
     paddingY = bbox(4) * paddingRatio;
 
@@ -539,4 +722,23 @@ function bbox = localPadBBox(bbox, imageSize, paddingRatio)
     y2 = min(imageSize(1), ceil(bbox(2) + bbox(4) + paddingY));
 
     bbox = [x1 y1 max(1, x2 - x1) max(1, y2 - y1)];
+end
+
+function localShowDetectionCandidateDebug(grayImage, candidateRecords, config)
+    % LOCALSHOWDETECTIONCANDIDATEDEBUG If debugging is enabled, this function will print a summary of the
+    % candidates and show a figure with the top candidates overlaid on the original image.
+
+    if isempty(candidateRecords) || ~isfield(config, "debug")
+        return;
+    end
+
+    if isfield(config.debug, "printDetectionCandidateSummary") && ...
+            config.debug.printDetectionCandidateSummary
+        showDetectionCandidateSummary(candidateRecords, config);
+    end
+
+    if isfield(config.debug, "showDetectionCandidatesFigure") && ...
+            config.debug.showDetectionCandidatesFigure
+        showDetectionCandidateDebugFigure(grayImage, candidateRecords, config);
+    end
 end

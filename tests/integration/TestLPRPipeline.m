@@ -12,7 +12,6 @@ classdef TestLPRPipeline < matlab.unittest.TestCase
             testCase.verifyEqual(result.status, "ok");
             testCase.verifyGreaterThanOrEqual(numel(result.characterImages), 2);
             testCase.verifyNotEmpty(result.stateInfo.name);
-            testCase.verifyTrue(isfield(result, "estimatedVehicleType"));
             testCase.verifyTrue(isfield(result.debug, "evaluatedCandidates"));
             testCase.verifyNotEmpty(result.debug.evaluatedCandidates);
             testCase.verifyTrue(isfield(result.debug, "selectedCandidateIndex"));

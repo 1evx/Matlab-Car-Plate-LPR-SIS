@@ -24,7 +24,6 @@ classdef LPRStateApp < handle
         PlateTextField matlab.ui.control.EditField
         StateField matlab.ui.control.EditField
         CategoryField matlab.ui.control.EditField
-        VehicleTypeField matlab.ui.control.EditField
         ConfidenceField matlab.ui.control.EditField
         StatusArea matlab.ui.control.TextArea
     end
@@ -81,7 +80,7 @@ classdef LPRStateApp < handle
             axis(app.DebugAxes, "off")
 
             app.RightLayout = uigridlayout(app.RootLayout, [14 1]);
-            app.RightLayout.RowHeight = {26, 26, 110, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, '1x'};
+            app.RightLayout.RowHeight = {26, 26, 110, 26, 26, 26, 26, 26, 26, 26, 26, 26, '2x'};
 
             uilabel(app.RightLayout, "Text", "Image Path");
             app.ImagePathField = uieditfield(app.RightLayout, "text", "Editable", "off");
@@ -108,13 +107,11 @@ classdef LPRStateApp < handle
             uilabel(app.RightLayout, "Text", "Category");
             app.CategoryField = uieditfield(app.RightLayout, "text", "Editable", "off");
 
-            uilabel(app.RightLayout, "Text", "Estimated Vehicle Type");
-            app.VehicleTypeField = uieditfield(app.RightLayout, "text", "Editable", "off");
-
             uilabel(app.RightLayout, "Text", "Confidence");
             app.ConfidenceField = uieditfield(app.RightLayout, "text", "Editable", "off");
 
-            app.StatusArea = uitextarea(app.RightLayout, "Editable", "off");
+            uilabel(app.RightLayout, "Text", "Log & Status");
+            app.StatusArea = uitextarea(app.RightLayout, "Editable", "off", "FontSize", 12);
         end
 
         function onLoadImage(app)
@@ -162,7 +159,6 @@ classdef LPRStateApp < handle
             app.PlateTextField.Value = "";
             app.StateField.Value = "";
             app.CategoryField.Value = "";
-            app.VehicleTypeField.Value = "";
             app.ConfidenceField.Value = "";
             app.StatusArea.Value = "Ready. Load an image to begin.";
         end
@@ -192,7 +188,6 @@ classdef LPRStateApp < handle
             app.PlateTextField.Value = char(result.recognizedText);
             app.StateField.Value = char(result.stateInfo.name);
             app.CategoryField.Value = char(result.stateInfo.category);
-            app.VehicleTypeField.Value = char(result.estimatedVehicleType.label);
             app.ConfidenceField.Value = sprintf("%.2f", result.confidence);
 
             app.appendStatus("Status: " + string(result.status));

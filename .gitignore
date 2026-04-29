@@ -10,6 +10,7 @@
 *.tmp
 *.zip
 
+desktop.ini
 .DS_Store
 Thumbs.db
 
@@ -25,4 +26,5 @@ experiments/results/*.jpg
 experiments/results/*.mat
 
 models/trained/*.mat
+
 

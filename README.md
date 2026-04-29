@@ -110,7 +110,6 @@ The processing flow is:
 4. Segment characters from single-line or two-row layouts
 5. Recognize characters with a classical feature-based classifier and Malaysian syntax constraints
 6. Infer the state/series with Malaysian registration rules
-7. Optionally estimate vehicle type with a separate rule-based heuristic for GUI display only
 
 Key public entry points:
 

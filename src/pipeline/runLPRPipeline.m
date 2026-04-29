@@ -13,17 +13,17 @@ function result = runLPRPipeline(imageInput, config)
         "characterBBoxes", zeros(0, 4), ...
         "recognizedText", "", ...
         "stateInfo", identifyState("", config.malaysiaRules), ...
-        "estimatedVehicleType", estimateVehicleTypeHeuristic([], [], config), ...
         "confidence", 0, ...
         "status", "initialized", ...
         "messages", strings(0,1), ...
         "debug", struct());
 
     % Stage 1: grayscale conversion, denoising, and contrast enhancement.
-    [preprocessedImage, preprocessMeta] = preprocessImage(inputImage, config);
+    [~, preprocessMeta] = preprocessImage(inputImage, config);
+    localShowPreprocessingDebugFigure(preprocessMeta, config);
 
-% Stage 2: locate the most likely plate region in the full vehicle image.
-[plateBBox, plateMeta] = detectPlateRegion(preprocessMeta.grayImage, config);
+    % Stage 2: locate the most likely plate region in the full vehicle image.
+    [plateBBox, plateMeta] = detectPlateRegion(preprocessMeta.grayImage, config);
     result.debug.gray = preprocessMeta.grayImage;
     result.debug.denoised = preprocessMeta.denoisedImage;
     result.debug.enhanced = preprocessMeta.preprocessedImage;
@@ -63,9 +63,6 @@ function result = runLPRPipeline(imageInput, config)
     recognitionMeta = selectedCandidate.recognitionMeta;
     stateInfo = selectedCandidate.stateInfo;
 
-    % Optional display-only heuristic. It never changes the LPR or SIS output.
-    vehicleTypeEstimate = estimateVehicleTypeHeuristic(inputImage, plateBBox, config);
-
     result.plateBBox = plateBBox;
     result.plateScore = selectedCandidate.detectorScore;
     result.plateCrop = rectifyMeta.croppedPlate;
@@ -74,13 +71,11 @@ function result = runLPRPipeline(imageInput, config)
     result.characterBBoxes = characterBBoxes;
     result.recognizedText = string(recognizedText);
     result.stateInfo = stateInfo;
-    result.estimatedVehicleType = vehicleTypeEstimate;
     result.confidence = selectedCandidate.finalScore;
     result.status = "ok";
     result.messages(end+1) = "Pipeline completed successfully.";
     result.messages(end+1) = "Selected candidate " + selectedCandidate.candidateIndex + ...
         " after regex/state reranking.";
-    result.messages(end+1) = "Estimated vehicle type: " + vehicleTypeEstimate.label;
 
     result.debug.rectifiedBinaryMask = rectifyMeta.binaryMask;
     result.debug.rectifiedAngle = rectifyMeta.angle;
@@ -93,11 +88,10 @@ function result = runLPRPipeline(imageInput, config)
     result.debug.evaluatedCandidates = evaluatedCandidates;
     result.debug.selectedCandidateIndex = selectedCandidateIndex;
     result.debug.selectedCandidateReason = selectedCandidate.selectionReason;
-    result.debug.vehicleTypeMetrics = vehicleTypeEstimate.metrics;
     result.debug.overlay = drawResults(inputImage, result);
-    end
+end
 
-    function image = localReadImage(imageInput)
+function image = localReadImage(imageInput)
     if isstring(imageInput) || ischar(imageInput)
         image = imread(imageInput);
     else
@@ -107,4 +101,13 @@ function result = runLPRPipeline(imageInput, config)
     if ndims(image) == 2
         image = repmat(image, 1, 1, 3);
     end
+end
+
+function localShowPreprocessingDebugFigure(preprocessMeta, config)
+    if ~isfield(config, "debug") || ~isfield(config.debug, "showPreprocessingFigure") || ...
+            ~config.debug.showPreprocessingFigure
+        return;
+    end
+
+    showPreprocessingDebugFigure(preprocessMeta);
 end
