@@ -9,11 +9,10 @@ function result = runLPRPipeline(imageInput, config)
         "plateScore", 0, ...
         "plateCrop", [], ...
         "rectifiedPlate", [], ...
-        "characterImages", {{}}, ...
-        "characterBBoxes", zeros(0, 4), ...
         "recognizedText", "", ...
         "stateInfo", identifyState("", config.malaysiaRules), ...
         "confidence", 0, ...
+        "recognitionPath", "matlab_ocr", ...
         "status", "initialized", ...
         "messages", strings(0,1), ...
         "debug", struct());
@@ -56,9 +55,6 @@ function result = runLPRPipeline(imageInput, config)
     plateBBox = selectedCandidate.bbox;
     rectifiedPlate = selectedCandidate.rectifiedPlate;
     rectifyMeta = selectedCandidate.rectifyMeta;
-    characterImages = selectedCandidate.characterImages;
-    characterBBoxes = selectedCandidate.characterBBoxes;
-    segmentMeta = selectedCandidate.segmentMeta;
     recognizedText = selectedCandidate.recognizedText;
     recognitionMeta = selectedCandidate.recognitionMeta;
     stateInfo = selectedCandidate.stateInfo;
@@ -67,28 +63,38 @@ function result = runLPRPipeline(imageInput, config)
     result.plateScore = selectedCandidate.detectorScore;
     result.plateCrop = rectifyMeta.croppedPlate;
     result.rectifiedPlate = rectifiedPlate;
-    result.characterImages = characterImages;
-    result.characterBBoxes = characterBBoxes;
     result.recognizedText = string(recognizedText);
     result.stateInfo = stateInfo;
     result.confidence = selectedCandidate.finalScore;
-    result.status = "ok";
-    result.messages(end+1) = "Pipeline completed successfully.";
+    result.recognitionPath = string(selectedCandidate.recognitionPath);
+    recognitionSucceeded = localRecognitionSucceeded(recognitionMeta, recognizedText);
+    if recognitionSucceeded
+        result.status = "ok";
+        result.messages(end+1) = "Pipeline completed successfully.";
+    else
+        result.status = "ocr_failed";
+        result.messages(end+1) = "Plate candidate was detected, but MATLAB OCR returned empty text.";
+    end
     result.messages(end+1) = "Selected candidate " + selectedCandidate.candidateIndex + ...
         " after regex/state reranking.";
 
     result.debug.rectifiedBinaryMask = rectifyMeta.binaryMask;
     result.debug.rectifiedAngle = rectifyMeta.angle;
-    result.debug.segmentedBinary = segmentMeta.binaryMask;
-    result.debug.segmentedOverlay = segmentMeta.overlay;
-    result.debug.segmentationPolarity = segmentMeta.polarityUsed;
-    result.debug.segmentationCandidates = segmentMeta.maskCandidates;
-    result.debug.segmentationRowLayout = segmentMeta.rowLayout;
     result.debug.recognition = recognitionMeta;
+    result.debug.ocrInputPlate = selectedCandidate.ocrInputPlate;
     result.debug.evaluatedCandidates = evaluatedCandidates;
     result.debug.selectedCandidateIndex = selectedCandidateIndex;
     result.debug.selectedCandidateReason = selectedCandidate.selectionReason;
+    result.debug.selectedRecognitionPath = string(selectedCandidate.recognitionPath);
     result.debug.overlay = drawResults(inputImage, result);
+end
+
+function isSuccess = localRecognitionSucceeded(recognitionMeta, recognizedText)
+    isSuccess = strlength(string(recognizedText)) > 0;
+    if isstruct(recognitionMeta) && isfield(recognitionMeta, "matlabOcr") && ...
+            isstruct(recognitionMeta.matlabOcr) && isfield(recognitionMeta.matlabOcr, "success")
+        isSuccess = isSuccess && logical(recognitionMeta.matlabOcr.success);
+    end
 end
 
 function image = localReadImage(imageInput)

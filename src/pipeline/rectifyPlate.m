@@ -34,6 +34,8 @@ function [rectifiedPlate, metadata] = rectifyPlate(inputImage, bbox, config)
 end
 
 function [angle, confidence] = localEstimateSkew(edgeMask, config)
+    % LOCAL_ESTIMATESKEW Estimate the skew angle of a plate candidate using Hough transform on edge mask.
+
     angle = 0;
     confidence = 0;
 
@@ -87,6 +89,8 @@ function [angle, confidence] = localEstimateSkew(edgeMask, config)
 end
 
 function paddedBBox = localPadBBox(bbox, imageSize, paddingRatio)
+    % LOCALPADBBOX Expand the bounding box by a certain padding ratio while ensuring it stays within image bounds.
+
     paddingX = bbox(3) * paddingRatio;
     paddingY = bbox(4) * paddingRatio;
 

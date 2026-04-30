@@ -5,7 +5,7 @@ MATLAB starter project for a License Plate Recognition (LPR) and State Identific
 ## Project Goals
 
 - Detect license plates from vehicle images under varied lighting, distance, and background conditions.
-- Segment and recognize plate characters using classical computer-vision techniques.
+- Detect and recognize Malaysian plate text from rectified plate crops using MATLAB OCR.
 - Infer the registered Malaysian state or special category from the recognized plate text.
 - Provide a GUI for demonstrations and coursework presentation.
 
@@ -18,8 +18,9 @@ Required:
 
 Optional:
 - Statistics and Machine Learning Toolbox
+- Computer Vision Toolbox or MATLAB OCR support, depending on your installation
 
-If the statistics toolbox is unavailable, the character recognizer falls back to prototype-based nearest-neighbor matching over handcrafted character features. The scaffold does not require Computer Vision Toolbox for the current baseline implementation.
+The current baseline uses MATLAB's built-in `ocr()` on rectified plate crops rather than character segmentation or external Tesseract installation.
 
 ## Quick Start
 
@@ -42,12 +43,6 @@ main
 result = main("data/samples/example.jpg");
 disp(result.recognizedText)
 disp(result.stateInfo)
-```
-
-5. If you want the classical feature-based character model ready in advance:
-
-```matlab
-trainCharacterClassifier
 ```
 
 ## Notes About the GUI
@@ -107,15 +102,13 @@ The processing flow is:
 1. Normalize lighting and enhance contrast
 2. Generate and rank likely license plate candidates with multi-branch morphology and connected-component analysis
 3. Rectify and crop the plate
-4. Segment characters from single-line or two-row layouts
-5. Recognize characters with a classical feature-based classifier and Malaysian syntax constraints
-6. Infer the state/series with Malaysian registration rules
+4. Recognize plate text with MATLAB OCR across a few plate-image variants
+5. Infer the state/series with Malaysian registration rules
 
 Key public entry points:
 
 - `runLPRPipeline`
 - `detectPlateRegion`
-- `segmentCharacters`
 - `recognizeCharacters`
 - `identifyState`
 - `LPRStateApp`

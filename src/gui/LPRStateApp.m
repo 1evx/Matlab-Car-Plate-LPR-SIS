@@ -76,7 +76,7 @@ classdef LPRStateApp < handle
             axis(app.PlateAxes, "off")
 
             app.DebugAxes = uiaxes(app.LeftLayout);
-            title(app.DebugAxes, "Character Segmentation")
+            title(app.DebugAxes, "OCR Input")
             axis(app.DebugAxes, "off")
 
             app.RightLayout = uigridlayout(app.RootLayout, [14 1]);
@@ -178,9 +178,9 @@ classdef LPRStateApp < handle
                 cla(app.PlateAxes);
             end
 
-            if isfield(result.debug, "segmentedOverlay") && ~isempty(result.debug.segmentedOverlay)
-                imshow(result.debug.segmentedOverlay, "Parent", app.DebugAxes);
-                title(app.DebugAxes, "Character Segmentation")
+            if isfield(result.debug, "ocrInputPlate") && ~isempty(result.debug.ocrInputPlate)
+                imshow(result.debug.ocrInputPlate, "Parent", app.DebugAxes);
+                title(app.DebugAxes, "OCR Input")
             else
                 cla(app.DebugAxes);
             end
@@ -191,6 +191,10 @@ classdef LPRStateApp < handle
             app.ConfidenceField.Value = sprintf("%.2f", result.confidence);
 
             app.appendStatus("Status: " + string(result.status));
+            if isfield(result, "recognitionPath")
+                app.appendStatus("Recognition path: " + string(result.recognitionPath));
+            end
+            app.appendRecognitionStatus(result);
             for i = 1:numel(result.messages)
                 app.appendStatus(result.messages(i));
             end
@@ -204,6 +208,35 @@ classdef LPRStateApp < handle
                 app.StatusArea.Value = message;
             else
                 app.StatusArea.Value = [existingMessages(:); message];
+            end
+        end
+
+        function appendRecognitionStatus(app, result)
+            if ~isfield(result, "debug") || ~isfield(result.debug, "recognition") || isempty(result.debug.recognition)
+                return;
+            end
+
+            recognitionMeta = result.debug.recognition;
+            method = "unknown";
+            if isfield(recognitionMeta, "method") && strlength(string(recognitionMeta.method)) > 0
+                method = string(recognitionMeta.method);
+            end
+
+            app.appendStatus("OCR method: " + method);
+
+            if isfield(recognitionMeta, "matlabOcr") && isstruct(recognitionMeta.matlabOcr)
+                if isfield(recognitionMeta.matlabOcr, "success")
+                    app.appendStatus("MATLAB OCR success: " + string(logical(recognitionMeta.matlabOcr.success)));
+                end
+                if isfield(recognitionMeta.matlabOcr, "text") && strlength(string(recognitionMeta.matlabOcr.text)) > 0
+                    app.appendStatus("MATLAB OCR raw text: " + string(recognitionMeta.matlabOcr.text));
+                end
+                if isfield(recognitionMeta.matlabOcr, "confidence")
+                    app.appendStatus("MATLAB OCR confidence: " + sprintf("%.2f", double(recognitionMeta.matlabOcr.confidence)));
+                end
+                if isfield(recognitionMeta, "ocrInputName") && strlength(string(recognitionMeta.ocrInputName)) > 0
+                    app.appendStatus("OCR input variant: " + string(recognitionMeta.ocrInputName));
+                end
             end
         end
     end

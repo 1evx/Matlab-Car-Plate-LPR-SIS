@@ -1,26 +1,33 @@
 classdef TestRecognition < matlab.unittest.TestCase
     methods (Test)
-        function featureRecognizerReadsCleanRenderedGlyphs(testCase)
+        function matlabRecognizerReadsPlateCrop(testCase)
             cfg = defaultConfig();
-            cfg.classification.syntheticFonts = {'Consolas'};
-            cfg.classification.syntheticRotationDegrees = 0;
-            cfg.classification.trainedModelPath = fullfile(tempdir, "baselineCharacterModel_test.mat");
-            plateText = "B123";
-            glyphs = cell(1, strlength(plateText));
+            testCase.assumeTrue(exist("ocr", "file") == 2 || exist("ocr", "builtin") == 5, ...
+                "MATLAB OCR function is unavailable.");
 
-            for i = 1:strlength(plateText)
-                canvas = renderTextImage(extractBetween(plateText, i, i), [70 40], ...
-                    "FontName", "Consolas", ...
-                    "FontSize", 30);
-                glyphs{i} = imbinarize(canvas, "adaptive", "ForegroundPolarity", "dark");
-            end
+            [sceneImage, meta] = createSyntheticPlateImage("BPK1234");
+            plateCrop = imcrop(sceneImage, meta.plateBox);
 
-            [recognizedText, metadata] = recognizeCharacters(glyphs, cfg, []);
+            [recognizedText, metadata] = recognizeCharacters(plateCrop, cfg);
 
-            testCase.verifyEqual(string(metadata.method), "feature_classifier");
-            testCase.verifyNumElements(metadata.confidences, strlength(plateText));
-            testCase.verifyEqual(strlength(string(recognizedText)), strlength(plateText));
-            testCase.verifyNumElements(metadata.topCandidates, strlength(plateText));
+            testCase.verifyEqual(string(metadata.method), "matlab_ocr");
+            testCase.verifyTrue(isfield(metadata, "ocrInputPlate"));
+            testCase.verifyTrue(isfield(metadata, "matlabOcr"));
+            testCase.verifyTrue(metadata.matlabOcr.success);
+            testCase.verifyEqual(string(recognizedText), "BPK1234");
+            testCase.verifyGreaterThanOrEqual(mean(metadata.confidences), 0);
+        end
+
+        function matlabRecognizerReturnsEmptyTextForEmptyPlate(testCase)
+            cfg = defaultConfig();
+            plateCrop = uint8([]);
+
+            [recognizedText, metadata] = recognizeCharacters(plateCrop, cfg);
+
+            testCase.verifyEqual(string(recognizedText), "");
+            testCase.verifyEqual(string(metadata.method), "matlab_ocr");
+            testCase.verifyTrue(isfield(metadata, "matlabOcr"));
+            testCase.verifyFalse(metadata.matlabOcr.success);
         end
     end
 end

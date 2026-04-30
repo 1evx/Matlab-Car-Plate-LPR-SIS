@@ -1,45 +1,197 @@
-function [recognizedText, metadata] = recognizeCharacters(characterImages, config, plateImage)
-    %RECOGNIZECHARACTERS Recognize segmented plate characters with feature classification.
+function [recognizedText, metadata] = recognizeCharacters(plateImage, config)
+    %RECOGNIZECHARACTERS Recognize plate text from a rectified plate image using MATLAB OCR.
 
-    if nargin < 3
-        plateImage = [];
+    if nargin < 2
+        config = defaultConfig();
     end
 
     config = validateConfig(config);
+    metadata = localEmptyMetadata(plateImage);
 
-    if isempty(characterImages)
+    if isempty(plateImage)
         recognizedText = "";
-        metadata = localEmptyMetadata(plateImage);
         return;
     end
 
-    model = localLoadOrTrainModel(config);
-    [scoreMatrix, labels, featureMatrix, topCandidates, rawPredictions, rawConfidences] = ...
-        localScoreCharacters(characterImages, model, config);
+    variants = localOcrVariants(plateImage, config);
+    bestResult = struct("text", "", "confidence", 0, "success", false, "errorMessage", "");
+    bestVariantName = "";
+    bestVariantImage = plateImage;
+    attemptedResults = cell(numel(variants), 1);
+    bestScore = -inf;
 
-    [parsedText, parsedConfidences, parsedPattern] = ...
-        localParsePlatePattern(scoreMatrix, labels, config);
-    if strlength(parsedText) == 0
-        recognizedText = join(rawPredictions, "");
-        confidences = rawConfidences(:);
-    else
-        recognizedText = parsedText;
-        confidences = parsedConfidences(:);
+    for i = 1:numel(variants)
+        variantConfig = config;
+        variantConfig.classification.matlabOcrTextLayout = variants(i).layout;
+        ocrResult = runMatlabOCR(variants(i).image, variantConfig);
+        attemptedResults{i} = struct( ...
+            "name", variants(i).name, ...
+            "layout", string(variants(i).layout), ...
+            "image", variants(i).image, ...
+            "result", ocrResult);
+
+        candidateText = localNormalizeOcrText(ocrResult.text);
+        candidateText = localCanonicalizeOcrText(candidateText, config);
+        candidateScore = localOcrCandidateScore(candidateText, ocrResult.confidence, ocrResult.success, config);
+        if candidateScore > bestScore
+            bestScore = candidateScore;
+            bestResult = ocrResult;
+            bestResult.text = candidateText;
+            bestVariantName = variants(i).name;
+            bestVariantImage = variants(i).image;
+        end
     end
 
-    stateLookupText = localDeriveStateLookupText(scoreMatrix, labels, config, recognizedText);
+    recognizedText = string(bestResult.text);
+    predictions = localStringCharacters(recognizedText);
+    confidences = localExpandOcrConfidence(recognizedText, bestResult);
+
     metadata = struct( ...
-        "predictions", string(regexp(char(recognizedText), ".", "match")).', ...
+        "predictions", predictions, ...
         "confidences", confidences, ...
-        "rawPredictions", rawPredictions(:), ...
-        "rawConfidences", rawConfidences(:), ...
-        "stateLookupText", stateLookupText, ...
-        "parsedText", parsedText, ...
-        "parsedPattern", parsedPattern, ...
-        "topCandidates", {topCandidates}, ...
-        "featureVectors", featureMatrix, ...
-        "method", "feature_classifier", ...
-        "plateImage", plateImage);
+        "rawPredictions", predictions, ...
+        "rawConfidences", confidences, ...
+        "stateLookupText", string(recognizedText), ...
+        "parsedText", string(recognizedText), ...
+        "parsedPattern", localOcrPatternLabel(recognizedText, config), ...
+        "topCandidates", {localOcrTopCandidates(predictions, confidences)}, ...
+        "method", "matlab_ocr", ...
+        "plateImage", plateImage, ...
+        "ocrInputPlate", bestVariantImage, ...
+        "ocrInputName", string(bestVariantName), ...
+        "attemptedResults", {attemptedResults}, ...
+        "matlabOcr", bestResult);
+end
+
+function variants = localOcrVariants(plateImage, config)
+    grayImage = plateImage;
+    if ndims(grayImage) == 3
+        grayImage = im2gray(grayImage);
+    end
+
+    preparedImage = prepareTesseractPlateImage(plateImage, config);
+    invgrayImage = imcomplement(grayImage);
+    binaryImage = imbinarize(im2single(grayImage), "adaptive", ...
+        "ForegroundPolarity", "bright", ...
+        "Sensitivity", 0.42);
+    binaryImage = uint8(binaryImage) * 255;
+
+    variants = [ ...
+        struct("name", "raw_line", "layout", "Line", "image", plateImage); ...
+        struct("name", "gray_line", "layout", "Line", "image", grayImage); ...
+        struct("name", "binary_line", "layout", "Line", "image", binaryImage); ...
+        struct("name", "invgray_line", "layout", "Line", "image", invgrayImage); ...
+        struct("name", "raw_block", "layout", "Block", "image", plateImage); ...
+        struct("name", "gray_block", "layout", "Block", "image", grayImage); ...
+        struct("name", "invgray_block", "layout", "Block", "image", invgrayImage); ...
+        struct("name", "prepared_block", "layout", "Block", "image", preparedImage); ...
+        struct("name", "prepared_word", "layout", "Word", "image", preparedImage) ...
+    ];
+end
+
+function score = localOcrCandidateScore(text, confidence, success, config)
+    text = string(text);
+    if ~logical(success) || strlength(text) == 0
+        score = -1;
+        return;
+    end
+
+    normalized = upper(regexprep(text, "[^A-Z0-9]", ""));
+    letterCount = strlength(regexprep(normalized, "[^A-Z]", ""));
+    digitCount = strlength(regexprep(normalized, "[^0-9]", ""));
+    totalCount = strlength(normalized);
+    [prefixLength, leadingDigitCount, suffixLength, isOrdered] = localOcrTextShape(normalized);
+
+    allowSuffixLetter = isfield(config, "classification") && ...
+        isfield(config.classification, "allowSuffixLetter") && ...
+        logical(config.classification.allowSuffixLetter);
+    if allowSuffixLetter
+        exactPattern = "^[A-Z]{1,4}[0-9]{1,4}[A-Z]?$";
+    else
+        exactPattern = "^[A-Z]{1,4}[0-9]{1,4}$";
+    end
+
+    regexBonus = 0;
+    if ~isempty(regexp(normalized, exactPattern, "once"))
+        regexBonus = 0.40;
+    elseif ~isempty(regexp(normalized, "^[A-Z]{1,4}[0-9]{1,4}", "once"))
+        regexBonus = 0.22;
+    end
+
+    compositionBonus = 0;
+    if letterCount >= 1 && digitCount >= 1
+        compositionBonus = 0.18;
+    end
+
+    structureBonus = 0;
+    if isOrdered
+        structureBonus = structureBonus + 0.12;
+    end
+    if prefixLength >= 2 && prefixLength <= 3
+        structureBonus = structureBonus + 0.16;
+    elseif prefixLength == 1
+        structureBonus = structureBonus + 0.04;
+    end
+    if leadingDigitCount >= 3 && leadingDigitCount <= 4
+        structureBonus = structureBonus + 0.10;
+    elseif leadingDigitCount >= 1
+        structureBonus = structureBonus + 0.03;
+    end
+    if suffixLength > 0
+        if allowSuffixLetter
+            structureBonus = structureBonus - 0.06 * suffixLength;
+        else
+            structureBonus = structureBonus - 0.24 * suffixLength;
+        end
+    end
+
+    lengthPenalty = 0.10 * abs(totalCount - 7);
+    shortPenalty = 0;
+    if totalCount < 5
+        shortPenalty = shortPenalty + 0.18;
+    end
+    if prefixLength <= 1 && totalCount <= 5
+        shortPenalty = shortPenalty + 0.16;
+    end
+    if prefixLength == 0 && digitCount > 0
+        shortPenalty = shortPenalty + 0.12;
+    end
+
+    exactNoSuffixBonus = 0;
+    if suffixLength == 0 && isOrdered && prefixLength >= 1 && prefixLength <= 4 && ...
+            leadingDigitCount >= 1 && leadingDigitCount <= 4
+        exactNoSuffixBonus = 0.08;
+    end
+
+    forbiddenSuffixPenalty = 0;
+    if suffixLength > 0 && ~allowSuffixLetter
+        forbiddenSuffixPenalty = 0.16 + 0.08 * min(suffixLength, 2);
+    end
+
+    score = double(confidence) + regexBonus + compositionBonus + structureBonus + exactNoSuffixBonus - ...
+        lengthPenalty - shortPenalty - forbiddenSuffixPenalty;
+end
+
+function [prefixLength, digitLength, suffixLength, isOrdered] = localOcrTextShape(normalized)
+    prefixMatch = regexp(char(normalized), "^[A-Z]+", "match", "once");
+    if isempty(prefixMatch)
+        prefixLength = 0;
+    else
+        prefixLength = strlength(string(prefixMatch));
+    end
+
+    remaining = extractAfter(normalized, prefixLength);
+    digitMatch = regexp(char(remaining), "^[0-9]+", "match", "once");
+    if isempty(digitMatch)
+        digitLength = 0;
+    else
+        digitLength = strlength(string(digitMatch));
+    end
+
+    suffix = extractAfter(remaining, digitLength);
+    suffixLength = strlength(regexprep(suffix, "[^A-Z]", ""));
+    isOrdered = (prefixLength + digitLength + suffixLength) == strlength(normalized) && ...
+        suffixLength == strlength(suffix);
 end
 
 function metadata = localEmptyMetadata(plateImage)
@@ -52,305 +204,101 @@ function metadata = localEmptyMetadata(plateImage)
         "parsedText", "", ...
         "parsedPattern", "", ...
         "topCandidates", {cell(0, 1)}, ...
-        "featureVectors", zeros(0, 0), ...
-        "method", "none", ...
-        "plateImage", plateImage);
+        "method", "matlab_ocr", ...
+        "plateImage", plateImage, ...
+        "ocrInputPlate", plateImage, ...
+        "ocrInputName", "", ...
+        "attemptedResults", {cell(0, 1)}, ...
+        "matlabOcr", struct( ...
+            "success", false, ...
+            "text", "", ...
+            "confidence", 0, ...
+            "words", strings(0, 1), ...
+            "wordConfidences", zeros(0, 1), ...
+            "wordBoundingBoxes", zeros(0, 4), ...
+            "characterConfidences", zeros(0, 1), ...
+            "characterBoundingBoxes", zeros(0, 4), ...
+            "errorMessage", ""));
 end
 
-function model = localLoadOrTrainModel(config)
-    modelPath = string(config.classification.trainedModelPath);
-    requiresRetrain = ~isfile(modelPath);
-    if requiresRetrain && ~config.classification.autoTrainIfMissing
-        error("recognizeCharacters:MissingModel", ...
-            "Feature classifier model was not found: %s", modelPath);
+function normalizedText = localNormalizeOcrText(text)
+    normalizedText = upper(regexprep(string(text), "[^A-Z0-9]", ""));
+end
+
+function canonicalText = localCanonicalizeOcrText(text, config)
+    canonicalText = upper(regexprep(string(text), "[^A-Z0-9]", ""));
+    allowSuffixLetter = isfield(config, "classification") && ...
+        isfield(config.classification, "allowSuffixLetter") && ...
+        logical(config.classification.allowSuffixLetter);
+    if allowSuffixLetter || strlength(canonicalText) == 0
+        return;
     end
 
-    if requiresRetrain
-        trainCharacterClassifier(modelPath, config);
-    end
-
-    loaded = load(modelPath, "model");
-    model = loaded.model;
-    expectedFeatureLength = numel( ...
-        extractCharacterFeatures(false(config.features.characterImageSize), config));
-    modelFeatureLength = size(model.features, 2);
-
-    if modelFeatureLength ~= expectedFeatureLength && config.classification.autoTrainIfMissing
-        trainCharacterClassifier(modelPath, config);
-        loaded = load(modelPath, "model");
-        model = loaded.model;
+    suffixMatch = regexp(char(canonicalText), "^([A-Z]{1,4}[0-9]{1,4})[A-Z]$", "tokens", "once");
+    if ~isempty(suffixMatch)
+        canonicalText = string(suffixMatch{1});
     end
 end
 
-function [scoreMatrix, labels, featureMatrix, topCandidates, rawPredictions, rawConfidences] = ...
-        localScoreCharacters(characterImages, model, config)
+function confidences = localExpandOcrConfidence(recognizedText, ocrResult)
+    count = strlength(string(recognizedText));
+    if count == 0
+        confidences = zeros(0, 1);
+        return;
+    end
 
-    labels = localCharacterLabels(config);
-    numCharacters = numel(characterImages);
-    featureLength = numel(extractCharacterFeatures(false(config.features.characterImageSize), config));
-    featureMatrix = zeros(numCharacters, featureLength);
-    scoreMatrix = zeros(numCharacters, numel(labels));
-    topCandidates = cell(numCharacters, 1);
-    rawPredictions = strings(numCharacters, 1);
-    rawConfidences = zeros(numCharacters, 1);
+    if isfield(ocrResult, "characterConfidences") && numel(ocrResult.characterConfidences) == count
+        confidences = max(0, min(1, double(ocrResult.characterConfidences(:))));
+        return;
+    end
 
-    for i = 1:numCharacters
-        preparedGlyph = localPrepareGlyph(characterImages{i}, config);
-        featureMatrix(i, :) = extractCharacterFeatures(preparedGlyph, config);
-        scoreMatrix(i, :) = localClassScores(featureMatrix(i, :), model, labels);
+    confidences = repmat(max(0, min(1, double(ocrResult.confidence))), count, 1);
+end
 
-        [sortedScores, sortIdx] = sort(scoreMatrix(i, :), "descend");
-        topCount = min(config.classification.topCandidatesPerCharacter, numel(sortIdx));
+function predictions = localStringCharacters(text)
+    if strlength(string(text)) == 0
+        predictions = strings(0, 1);
+        return;
+    end
+    predictions = string(regexp(char(string(text)), ".", "match")).';
+end
+
+function topCandidates = localOcrTopCandidates(predictions, confidences)
+    topCandidates = cell(numel(predictions), 1);
+    for i = 1:numel(predictions)
         topCandidates{i} = struct( ...
-            "labels", labels(sortIdx(1:topCount)), ...
-            "scores", sortedScores(1:topCount));
-
-        rawPredictions(i) = labels(sortIdx(1));
-        rawConfidences(i) = sortedScores(1);
+            "labels", predictions(i), ...
+            "scores", confidences(i));
     end
 end
 
-function labels = localCharacterLabels(config)
-    characterSet = char(string(config.classification.characterSet));
-    labels = string(cellstr(characterSet.'));
-end
-
-function preparedGlyph = localPrepareGlyph(glyphImage, config)
-    if isempty(glyphImage)
-        preparedGlyph = false(config.features.characterImageSize);
+function patternLabel = localOcrPatternLabel(recognizedText, config)
+    normalized = string(recognizedText);
+    if strlength(normalized) == 0
+        patternLabel = "";
         return;
     end
 
-    preparedGlyph = glyphImage;
-    if ~islogical(preparedGlyph)
-        preparedGlyph = imbinarize(im2gray(preparedGlyph));
-    end
-
-    preparedGlyph = logical(preparedGlyph);
-    if mean(preparedGlyph(:)) > 0.5
-        preparedGlyph = ~preparedGlyph;
-    end
-
-    preparedGlyph = bwareaopen(preparedGlyph, 6);
-    props = regionprops(preparedGlyph, "BoundingBox", "Area");
-    if isempty(props)
-        preparedGlyph = false(config.features.characterImageSize);
-        return;
-    end
-
-    [~, idx] = max([props.Area]);
-    tightBox = ceil(props(idx).BoundingBox);
-    preparedGlyph = imcrop(preparedGlyph, tightBox);
-    if isempty(preparedGlyph)
-        preparedGlyph = false(config.features.characterImageSize);
-        return;
-    end
-
-    preparedGlyph = padarray(preparedGlyph, [2 2], 0, "both");
-end
-
-function scores = localClassScores(featureVector, model, labels)
-    scores = zeros(1, numel(labels));
-
-    if isfield(model, "classifier") && ~isempty(model.classifier)
-        [~, classifierScores] = predict(model.classifier, featureVector);
-        classNames = string(model.classifier.ClassNames);
-        for i = 1:numel(classNames)
-            labelIdx = find(labels == classNames(i), 1);
-            if ~isempty(labelIdx)
-                scores(labelIdx) = classifierScores(i);
-            end
-        end
-        scores = localNormalizeScores(scores);
-        return;
-    end
-
-    for i = 1:numel(labels)
-        labelMask = model.labels == labels(i);
-        labelFeatures = model.features(labelMask, :);
-        if isempty(labelFeatures)
-            continue;
-        end
-
-        distances = sum((labelFeatures - featureVector).^2, 2);
-        scores(i) = max(1 ./ (1 + distances));
-    end
-
-    scores = localNormalizeScores(scores);
-end
-
-function scores = localNormalizeScores(scores)
-    scores = max(0, double(scores));
-    totalScore = sum(scores);
-    if totalScore > 0
-        scores = scores / totalScore;
-    end
-end
-
-function [parsedText, parsedConfidences, parsedPattern] = localParsePlatePattern(scoreMatrix, labels, config)
-    parsedText = "";
-    parsedConfidences = zeros(0, 1);
-    parsedPattern = "";
-    numCharacters = size(scoreMatrix, 1);
-    bestScore = -inf;
-
-    for prefixLength = config.classification.allowedPrefixLengths
-        for digitLength = config.classification.allowedDigitLengths
-            for suffixLength = localSuffixOptions(config)
-                if prefixLength + digitLength + suffixLength ~= numCharacters
-                    continue;
-                end
-
-                [candidateText, candidateConfidences, candidateScore] = localScorePattern( ...
-                    scoreMatrix, labels, prefixLength, digitLength, suffixLength, config);
-
-                if candidateScore > bestScore
-                    bestScore = candidateScore;
-                    parsedText = candidateText;
-                    parsedConfidences = candidateConfidences;
-                    parsedPattern = sprintf("L%d-D%d-S%d", ...
-                        prefixLength, digitLength, suffixLength);
-                end
-            end
-        end
-    end
-
-    if bestScore < config.classification.minimumConfidence
-        parsedText = "";
-        parsedConfidences = zeros(0, 1);
-        parsedPattern = "";
-    end
-end
-
-function suffixOptions = localSuffixOptions(config)
-    if config.classification.allowSuffixLetter
-        suffixOptions = [0 1];
+    digitStart = regexp(char(normalized), "[0-9]", "once");
+    if isempty(digitStart)
+        prefixLength = strlength(regexprep(normalized, "[^A-Z]", ""));
     else
-        suffixOptions = 0;
+        prefixLength = strlength(regexprep(extractBefore(normalized, digitStart), "[^A-Z]", ""));
     end
-end
-
-function [candidateText, candidateConfidences, candidateScore] = ...
-        localScorePattern(scoreMatrix, labels, prefixLength, digitLength, suffixLength, config)
-
-    numCharacters = size(scoreMatrix, 1);
-    candidateChars = strings(1, numCharacters);
-    candidateConfidences = zeros(numCharacters, 1);
-    candidateScore = 0;
-
-    for position = 1:numCharacters
-        if position <= prefixLength
-            allowedClass = "letter";
-        elseif position <= prefixLength + digitLength
-            allowedClass = "digit";
-        else
-            allowedClass = "letter";
-        end
-
-        [bestLabel, bestScore] = localBestAllowedLabel( ...
-            scoreMatrix(position, :), labels, allowedClass, config);
-        candidateChars(position) = bestLabel;
-        candidateConfidences(position) = bestScore;
-        candidateScore = candidateScore + bestScore;
-    end
-
-    candidateText = join(candidateChars, "");
-    candidateScore = candidateScore / max(numCharacters, 1);
-
-    if strlength(candidateText) == 0
-        candidateScore = -inf;
-    elseif ~isempty(regexp(candidateText, "^[A-Z]{1,3}[0-9]{1,4}[A-Z]?$", "once"))
-        candidateScore = candidateScore + 0.02;
+    digitRun = regexp(char(normalized), "[0-9]+", "match", "once");
+    if isempty(digitRun)
+        digitLength = 0;
     else
-        candidateScore = candidateScore - config.classification.invalidPatternPenalty;
+        digitLength = strlength(string(digitRun));
     end
-end
+    suffixLength = strlength(normalized) - prefixLength - digitLength;
 
-function [bestLabel, bestScore] = localBestAllowedLabel(scoreRow, labels, allowedClass, config)
-    switch allowedClass
-        case "letter"
-            allowedMask = arrayfun(@(x) all(isstrprop(char(x), "alpha")), labels);
-        otherwise
-            allowedMask = arrayfun(@(x) all(isstrprop(char(x), "digit")), labels);
+    if prefixLength >= min(config.classification.allowedPrefixLengths) && ...
+            prefixLength <= max(config.classification.allowedPrefixLengths) && ...
+            digitLength >= min(config.classification.allowedDigitLengths) && ...
+            digitLength <= max(config.classification.allowedDigitLengths)
+        patternLabel = sprintf("L%d-D%d-S%d", prefixLength, digitLength, suffixLength);
+    else
+        patternLabel = "unparsed";
     end
-
-    allowedLabels = labels(allowedMask);
-    bestLabel = "";
-    bestScore = -inf;
-
-    for i = 1:numel(allowedLabels)
-        candidateLabel = allowedLabels(i);
-        score = localScoreLabelWithAmbiguity(scoreRow, labels, candidateLabel, config);
-        if score > bestScore
-            bestScore = score;
-            bestLabel = candidateLabel;
-        end
-    end
-end
-
-function score = localScoreLabelWithAmbiguity(scoreRow, labels, targetLabel, config)
-    targetIdx = find(labels == targetLabel, 1);
-    if isempty(targetIdx)
-        score = -inf;
-        return;
-    end
-
-    score = scoreRow(targetIdx);
-    alternateLabel = localAmbiguousPartner(targetLabel);
-    if strlength(alternateLabel) == 0
-        return;
-    end
-
-    alternateIdx = find(labels == alternateLabel, 1);
-    if isempty(alternateIdx)
-        return;
-    end
-
-    score = max(score, scoreRow(alternateIdx) - config.classification.ambiguityPenalty);
-end
-
-function alternateLabel = localAmbiguousPartner(label)
-    switch char(label)
-        case 'O'
-            alternateLabel = "0";
-        case '0'
-            alternateLabel = "O";
-        case 'I'
-            alternateLabel = "1";
-        case '1'
-            alternateLabel = "I";
-        case 'S'
-            alternateLabel = "5";
-        case '5'
-            alternateLabel = "S";
-        case 'B'
-            alternateLabel = "8";
-        case '8'
-            alternateLabel = "B";
-        case 'Z'
-            alternateLabel = "2";
-        case '2'
-            alternateLabel = "Z";
-        case 'G'
-            alternateLabel = "6";
-        case '6'
-            alternateLabel = "G";
-        otherwise
-            alternateLabel = "";
-    end
-end
-
-function stateLookupText = localDeriveStateLookupText(scoreMatrix, labels, config, recognizedText)
-    stateLookupText = string(recognizedText);
-    if strlength(stateLookupText) > 0
-        return;
-    end
-
-    prefixLength = min(3, size(scoreMatrix, 1));
-    prefixChars = strings(1, prefixLength);
-    for i = 1:prefixLength
-        [prefixChars(i), ~] = localBestAllowedLabel( ...
-            scoreMatrix(i, :), labels, "letter", config);
-    end
-    stateLookupText = join(prefixChars, "");
 end

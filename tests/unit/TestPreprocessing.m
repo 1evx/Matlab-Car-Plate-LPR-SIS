@@ -1,4 +1,4 @@
-classdef TestPreprocessAndHeuristic < matlab.unittest.TestCase
+classdef TestPreprocessing < matlab.unittest.TestCase
     methods (Test)
         function preprocessImageReturnsSingleChannelOutput(testCase)
             cfg = defaultConfig();

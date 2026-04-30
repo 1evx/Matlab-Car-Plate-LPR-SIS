@@ -4,8 +4,9 @@ classdef TestConfigAndRules < matlab.unittest.TestCase
             cfg = defaultConfig();
 
             testCase.verifyTrue(isfield(cfg, "detection"));
-            testCase.verifyTrue(isfield(cfg, "segmentation"));
             testCase.verifyTrue(isfield(cfg, "classification"));
+            testCase.verifyTrue(isfield(cfg, "reranking"));
+            testCase.verifyTrue(isfield(cfg.reranking.weights, "composition"));
             testCase.verifyTrue(isfield(cfg.debug, "showPreprocessingFigure"));
             testCase.verifyGreaterThan(numel(cfg.malaysiaRules), 5);
         end
