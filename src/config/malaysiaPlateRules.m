@@ -13,6 +13,8 @@ rules(end+1) = localRule("Military", "Military", "pattern", "^Z[A-Z0-9]+$", 100,
     "Military registration series.");
 rules(end+1) = localRule("Diplomatic Corps", "Diplomatic", "pattern", "^[0-9]{1,3}DC[0-9A-Z]*$", 95, ...
     "Diplomatic registration series.");
+rules(end+1) = localRule("International Islamic University Malaysia", "Institution Series", "prefix", "IIUM", 94, ...
+    "International Islamic University Malaysia registration series.");
 
 rules(end+1) = localRule("Putrajaya", "Federal Territory", "prefix", "F", 90, ...
     "Federal Territory of Putrajaya.");
@@ -63,4 +65,3 @@ function rule = localRule(name, category, matcherType, token, priority, descript
         "priority", priority, ...
         "description", string(description));
 end
-

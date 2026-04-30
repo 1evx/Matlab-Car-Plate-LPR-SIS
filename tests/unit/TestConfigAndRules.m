@@ -7,6 +7,9 @@ classdef TestConfigAndRules < matlab.unittest.TestCase
             testCase.verifyTrue(isfield(cfg, "classification"));
             testCase.verifyTrue(isfield(cfg, "reranking"));
             testCase.verifyTrue(isfield(cfg.reranking.weights, "composition"));
+            testCase.verifyTrue(isfield(cfg.detection, "minMaskAreaRatio"));
+            testCase.verifyTrue(isfield(cfg.rectification, "minTextHeightPixels"));
+            testCase.verifyTrue(cfg.classification.allowSuffixLetter);
             testCase.verifyTrue(isfield(cfg.debug, "showPreprocessingFigure"));
             testCase.verifyGreaterThan(numel(cfg.malaysiaRules), 5);
         end
@@ -18,11 +21,15 @@ classdef TestConfigAndRules < matlab.unittest.TestCase
             kedah = identifyState("KAA9876", rules);
             military = identifyState("Z1234", rules);
             diplomatic = identifyState("12DC88", rules);
+            sabahSuffix = identifyState("SJ230R", rules);
+            iiumSeries = identifyState("IIUM6763", rules);
 
             testCase.verifyEqual(selangor.name, "Selangor");
             testCase.verifyEqual(kedah.name, "Kedah");
             testCase.verifyEqual(military.category, "Military");
             testCase.verifyEqual(diplomatic.category, "Diplomatic");
+            testCase.verifyEqual(sabahSuffix.name, "Sabah");
+            testCase.verifyEqual(iiumSeries.category, "Institution Series");
         end
     end
 end

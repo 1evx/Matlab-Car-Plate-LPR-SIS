@@ -14,11 +14,12 @@ function [selectedCandidateIndex, evaluatedCandidates] = rerankPlateCandidates(i
 
     for i = 1:numCandidates
         detectorCandidate = localNormalizeCandidate(detectorCandidates(i));
-        paddedBBox = localPadBBox(detectorCandidate.bbox, imageSize, config.detection.platePadding);
+        paddedBBox = localPadBBox(detectorCandidate.bbox, imageSize, config.detection.platePadding, config);
         detectorPlate = localDetectorPlate(inputImage, detectorCandidate.bbox);
 
-        [rectifiedPlate, rectifyMeta] = rectifyPlate(inputImage, paddedBBox, config);
-        [recognizedText, recognitionMeta] = recognizeCharacters(rectifiedPlate, config);
+        [rectifiedPlate, rectifyMeta] = rectifyPlate(inputImage, paddedBBox, config, detectorCandidate);
+        recognitionHints = localRecognitionHints(detectorCandidate, rectifyMeta);
+        [recognizedText, recognitionMeta] = recognizeCharacters(rectifiedPlate, config, recognitionHints);
 
         stateLookupText = string(recognizedText);
         if isfield(recognitionMeta, "stateLookupText") && strlength(string(recognitionMeta.stateLookupText)) > 0
@@ -36,6 +37,7 @@ function [selectedCandidateIndex, evaluatedCandidates] = rerankPlateCandidates(i
             "rawBBox", detectorCandidate.bbox, ...
             "branchName", detectorCandidate.branchName, ...
             "profileName", detectorCandidate.profileName, ...
+            "layoutHint", localEvaluatedLayoutHint(detectorCandidate, rectifyMeta, recognitionMeta), ...
             "scale", detectorCandidate.scale, ...
             "detectorScore", detectorCandidate.score, ...
             "characterTextureScore", localGetCandidateField(detectorCandidate, "characterTextureScore"), ...
@@ -85,11 +87,13 @@ function detectorCandidate = localNormalizeCandidate(candidate)
         "score", 0, ...
         "branchName", "unknown", ...
         "profileName", "unknown", ...
+        "layoutHint", "unknown", ...
         "scale", 1.0, ...
         "characterTextureScore", 0, ...
         "plateContrastScore", 0, ...
         "componentAlignmentScore", 0, ...
         "textComponentCount", 0, ...
+        "rowCountEstimate", 0, ...
         "emptyRegionPenalty", 1);
 
     fields = fieldnames(candidate);
@@ -108,8 +112,9 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
     [lengthScore, lengthLabel] = localLengthScore(string(recognizedText), config);
     [structureScore, structureLabel, prefixLength, digitLength, suffixLength] = ...
         localStructureScore(string(recognizedText), config);
+    layoutHint = localEvaluatedLayoutHint(detectorCandidate, struct(), recognitionMeta);
     [framingScore, framingLabel, leftMargin, rightMargin] = ...
-        localFramingScore(ocrInputPlate, string(recognizedText));
+        localFramingScore(ocrInputPlate, string(recognizedText), layoutHint);
     [prefixScore, prefixLabel] = localPrefixPlausibilityScore(string(recognizedText), stateInfo, config);
     weakOcrFactor = localWeakOcrFactor(recognitionScore, config);
     ocrTrust = localOcrTrust(recognitionScore, prefixScore, weakOcrFactor);
@@ -205,6 +210,7 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         "suffixLength", suffixLength, ...
         "framing", framingScore, ...
         "framingLabel", string(framingLabel), ...
+        "layoutHint", string(layoutHint), ...
         "leftMargin", leftMargin, ...
         "rightMargin", rightMargin, ...
         "regex", confidenceAdjustedRegexScore, ...
@@ -568,7 +574,7 @@ function [prefixLength, digitLength, suffixLength, isOrdered] = localTextShape(n
         suffixLength == strlength(suffix);
 end
 
-function [score, label, leftMargin, rightMargin] = localFramingScore(plateImage, recognizedText)
+function [score, label, leftMargin, rightMargin] = localFramingScore(plateImage, recognizedText, layoutHint)
     score = 0.30;
     label = "unknown";
     leftMargin = 0;
@@ -584,6 +590,11 @@ function [score, label, leftMargin, rightMargin] = localFramingScore(plateImage,
     end
 
     grayImage = im2single(grayImage);
+    if nargin >= 3 && string(layoutHint) == "two_row"
+        [score, label, leftMargin, rightMargin] = localTwoRowFramingScore(grayImage);
+        return;
+    end
+
     rowStart = max(1, round(0.18 * size(grayImage, 1)));
     rowEnd = min(size(grayImage, 1), round(0.88 * size(grayImage, 1)));
     bandImage = grayImage(rowStart:rowEnd, :);
@@ -618,6 +629,59 @@ function [score, label, leftMargin, rightMargin] = localFramingScore(plateImage,
     score = 0.45 * edgeScore + 0.30 * symmetryScore + 0.25 * spanScore;
     score = max(0, min(1, score));
     label = "text_band";
+end
+
+function [score, label, leftMargin, rightMargin] = localTwoRowFramingScore(grayImage)
+    score = 0.25;
+    label = "two_row_unknown";
+    leftMargin = 0;
+    rightMargin = 0;
+
+    brightMask = imbinarize(grayImage, "adaptive", ...
+        "ForegroundPolarity", "bright", ...
+        "Sensitivity", 0.42);
+    brightMask = bwareaopen(brightMask, max(4, round(numel(brightMask) * 0.0020)));
+
+    rowProfile = mean(brightMask, 2);
+    positiveRows = rowProfile(rowProfile > 0);
+    if isempty(positiveRows)
+        label = "two_row_no_band";
+        return;
+    end
+
+    activeRows = rowProfile >= max(0.02, 0.55 * mean(positiveRows));
+    rowRuns = localLogicalRuns(activeRows);
+    if size(rowRuns, 1) < 2
+        [score, label, leftMargin, rightMargin] = localFramingScore(grayImage, "X");
+        score = 0.65 * score;
+        label = "fallback_single_band";
+        return;
+    end
+
+    runHeights = rowRuns(:, 2) - rowRuns(:, 1) + 1;
+    [~, order] = sort(runHeights, "descend");
+    rowRuns = sortrows(rowRuns(order(1:2), :), 1);
+
+    [topMargins, topSpan] = localBandMargins(brightMask(rowRuns(1, 1):rowRuns(1, 2), :));
+    [bottomMargins, bottomSpan] = localBandMargins(brightMask(rowRuns(2, 1):rowRuns(2, 2), :));
+    leftMargin = mean([topMargins(1) bottomMargins(1)]);
+    rightMargin = mean([topMargins(2) bottomMargins(2)]);
+
+    marginScore = mean([ ...
+        min(1, topMargins(1) / 0.02) ...
+        min(1, topMargins(2) / 0.02) ...
+        min(1, bottomMargins(1) / 0.02) ...
+        min(1, bottomMargins(2) / 0.02)]);
+    spanScore = mean([ ...
+        max(0, 1 - abs(topSpan - 0.56) / 0.34) ...
+        max(0, 1 - abs(bottomSpan - 0.56) / 0.34)]);
+    separation = rowRuns(2, 1) - rowRuns(1, 2);
+    separationScore = min(1, separation / max(0.08 * size(grayImage, 1), 1));
+    balanceScore = max(0, 1 - abs(runHeights(order(1)) - runHeights(order(2))) / ...
+        max(sum(runHeights(order(1:2))), 1));
+
+    score = max(0, min(1, mean([marginScore spanScore separationScore balanceScore])));
+    label = "two_row_band";
 end
 
 function reason = localSelectionReason(scoreBreakdown, recognizedText, stateInfo)
@@ -673,7 +737,7 @@ function plateImage = localDetectorPlate(inputImage, bbox)
     end
 end
 
-function bbox = localPadBBox(bbox, imageSize, paddingRatio)
+function bbox = localPadBBox(bbox, imageSize, paddingRatio, config)
     paddingX = bbox(3) * paddingRatio;
     paddingY = bbox(4) * paddingRatio;
 
@@ -682,6 +746,20 @@ function bbox = localPadBBox(bbox, imageSize, paddingRatio)
     x2 = min(imageSize(2), ceil(bbox(1) + bbox(3) + paddingX));
     y2 = min(imageSize(1), ceil(bbox(2) + bbox(4) + paddingY));
     bbox = [x1 y1 max(1, x2 - x1) max(1, y2 - y1)];
+
+    minCropHeight = 0;
+    if nargin >= 4 && isfield(config, "rectification") && ...
+            isfield(config.rectification, "minCropHeightPixels")
+        minCropHeight = double(config.rectification.minCropHeightPixels);
+    end
+    if bbox(4) < minCropHeight
+        extraHeight = minCropHeight - bbox(4);
+        growTop = floor(extraHeight / 2);
+        growBottom = ceil(extraHeight / 2);
+        y1 = max(1, bbox(2) - growTop);
+        y2 = min(imageSize(1), bbox(2) + bbox(4) - 1 + growBottom);
+        bbox = [bbox(1) y1 bbox(3) max(1, y2 - y1 + 1)];
+    end
 end
 
 function records = localEmptyEvaluatedCandidates()
@@ -691,6 +769,7 @@ function records = localEmptyEvaluatedCandidates()
         "rawBBox", {}, ...
         "branchName", {}, ...
         "profileName", {}, ...
+        "layoutHint", {}, ...
         "scale", {}, ...
         "detectorScore", {}, ...
         "characterTextureScore", {}, ...
@@ -739,4 +818,80 @@ function localShowEvaluatedCandidateDebug(evaluatedCandidates, config)
             config.debug.showRecognitionCandidatesFigure
         showRecognitionCandidateDebugFigure(evaluatedCandidates, config);
     end
+end
+
+function hints = localRecognitionHints(detectorCandidate, rectifyMeta)
+    layoutHint = "unknown";
+    if isstruct(rectifyMeta) && isfield(rectifyMeta, "layoutHint") && strlength(string(rectifyMeta.layoutHint)) > 0
+        layoutHint = string(rectifyMeta.layoutHint);
+    elseif isfield(detectorCandidate, "layoutHint") && strlength(string(detectorCandidate.layoutHint)) > 0
+        layoutHint = string(detectorCandidate.layoutHint);
+    elseif isfield(detectorCandidate, "profileName") && string(detectorCandidate.profileName) == "two_row"
+        layoutHint = "two_row";
+    end
+
+    hints = struct( ...
+        "profileName", string(detectorCandidate.profileName), ...
+        "layoutHint", layoutHint, ...
+        "textOnlyPlate", localStructImageField(rectifyMeta, "textOnlyPlate"), ...
+        "rowImages", {localStructCellField(rectifyMeta, "rowImages")}, ...
+        "rowCompositePlate", localStructImageField(rectifyMeta, "rowCompositePlate"));
+end
+
+function layoutHint = localEvaluatedLayoutHint(detectorCandidate, rectifyMeta, recognitionMeta)
+    layoutHint = "unknown";
+    if nargin >= 3 && isstruct(recognitionMeta) && isfield(recognitionMeta, "layoutHint") && ...
+            strlength(string(recognitionMeta.layoutHint)) > 0
+        layoutHint = string(recognitionMeta.layoutHint);
+    elseif nargin >= 2 && isstruct(rectifyMeta) && isfield(rectifyMeta, "layoutHint") && ...
+            strlength(string(rectifyMeta.layoutHint)) > 0
+        layoutHint = string(rectifyMeta.layoutHint);
+    elseif isfield(detectorCandidate, "layoutHint") && strlength(string(detectorCandidate.layoutHint)) > 0
+        layoutHint = string(detectorCandidate.layoutHint);
+    elseif isfield(detectorCandidate, "profileName") && string(detectorCandidate.profileName) == "two_row"
+        layoutHint = "two_row";
+    end
+end
+
+function imageValue = localStructImageField(inputStruct, fieldName)
+    imageValue = [];
+    if isstruct(inputStruct) && isfield(inputStruct, fieldName)
+        imageValue = inputStruct.(fieldName);
+    end
+end
+
+function cellValue = localStructCellField(inputStruct, fieldName)
+    cellValue = cell(0, 1);
+    if isstruct(inputStruct) && isfield(inputStruct, fieldName) && ~isempty(inputStruct.(fieldName))
+        cellValue = inputStruct.(fieldName);
+    end
+end
+
+function runs = localLogicalRuns(maskVector)
+    maskVector = logical(maskVector(:));
+    runs = zeros(0, 2);
+    if ~any(maskVector)
+        return;
+    end
+
+    changes = diff([false; maskVector; false]);
+    starts = find(changes == 1);
+    ends = find(changes == -1) - 1;
+    runs = [starts ends];
+end
+
+function [margins, spanRatio] = localBandMargins(mask)
+    if isempty(mask) || ~any(mask(:))
+        margins = [0 0];
+        spanRatio = 0;
+        return;
+    end
+
+    columnProfile = mean(mask, 1);
+    activeColumns = columnProfile > 0;
+    firstColumn = find(activeColumns, 1, "first");
+    lastColumn = find(activeColumns, 1, "last");
+    width = size(mask, 2);
+    margins = [(firstColumn - 1) / max(width, 1) (width - lastColumn) / max(width, 1)];
+    spanRatio = (lastColumn - firstColumn + 1) / max(width, 1);
 end
