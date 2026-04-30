@@ -22,10 +22,11 @@ function result = runMatlabOCR(plateImage, config)
         return;
     end
 
+    layoutValue = localLayoutAnalysisValue(config);
+    characterSet = char(string(config.classification.matlabOcrCharacterSet));
+
     try
-        ocrOutput = ocr(plateImage, ...
-            "TextLayout", char(string(config.classification.matlabOcrTextLayout)), ...
-            "CharacterSet", char(string(config.classification.matlabOcrCharacterSet)));
+        ocrOutput = localRunCompatibleOcr(plateImage, layoutValue, characterSet);
     catch exception
         result.errorMessage = string(exception.message);
         return;
@@ -47,6 +48,66 @@ function result = runMatlabOCR(plateImage, config)
     end
 
     result.success = strlength(result.text) > 0;
+end
+
+function ocrOutput = localRunCompatibleOcr(plateImage, layoutValue, characterSet)
+    % Use the modern LayoutAnalysis API on R2023a+ and fall back to the
+    % legacy TextLayout argument for older MATLAB releases.
+    try
+        ocrOutput = ocr(plateImage, ...
+            "LayoutAnalysis", layoutValue, ...
+            "CharacterSet", characterSet);
+    catch exception
+        if ~localIsLegacyTextLayoutError(exception)
+            rethrow(exception);
+        end
+
+        ocrOutput = ocr(plateImage, ...
+            "TextLayout", localLegacyTextLayoutValue(layoutValue), ...
+            "CharacterSet", characterSet);
+    end
+end
+
+function layoutValue = localLayoutAnalysisValue(config)
+    layoutValue = "line";
+    if isfield(config, "classification") && isfield(config.classification, "matlabOcrLayoutAnalysis")
+        layoutValue = lower(strtrim(string(config.classification.matlabOcrLayoutAnalysis)));
+    elseif isfield(config, "classification") && isfield(config.classification, "matlabOcrTextLayout")
+        layoutValue = lower(strtrim(string(config.classification.matlabOcrTextLayout)));
+    end
+
+    validValues = ["auto", "page", "block", "line", "word", "character", "none"];
+    if ~any(layoutValue == validValues)
+        layoutValue = "line";
+    end
+end
+
+function legacyValue = localLegacyTextLayoutValue(layoutValue)
+    switch string(layoutValue)
+        case "auto"
+            legacyValue = "Auto";
+        case "page"
+            legacyValue = "Paragraph";
+        case "block"
+            legacyValue = "Block";
+        case "line"
+            legacyValue = "Line";
+        case "word"
+            legacyValue = "Word";
+        case "character"
+            legacyValue = "Character";
+        case "none"
+            legacyValue = "Line";
+        otherwise
+            legacyValue = "Line";
+    end
+end
+
+function isLegacyError = localIsLegacyTextLayoutError(exception)
+    message = lower(string(exception.message));
+    isLegacyError = contains(message, "layoutanalysis") || ...
+        contains(message, "invalid parameter name") || ...
+        contains(message, "name-value");
 end
 
 function value = localReadOcrProperty(ocrOutput, propertyName, defaultValue)

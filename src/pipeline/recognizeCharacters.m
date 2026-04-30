@@ -22,6 +22,7 @@ function [recognizedText, metadata] = recognizeCharacters(plateImage, config)
 
     for i = 1:numel(variants)
         variantConfig = config;
+        variantConfig.classification.matlabOcrLayoutAnalysis = lower(string(variants(i).layout));
         variantConfig.classification.matlabOcrTextLayout = variants(i).layout;
         ocrResult = runMatlabOCR(variants(i).image, variantConfig);
         attemptedResults{i} = struct( ...

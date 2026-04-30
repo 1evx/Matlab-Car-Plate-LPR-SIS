@@ -19,6 +19,8 @@ classdef TestReranking < matlab.unittest.TestCase
             testCase.verifyTrue(isfield(evaluatedCandidates, "plateEvidenceScore"));
             testCase.verifyTrue(isfield(evaluatedCandidates, "emptyPenalty"));
             testCase.verifyTrue(isfield(evaluatedCandidates, "lengthScore"));
+            testCase.verifyTrue(isfield(evaluatedCandidates, "detectorPlate"));
+            testCase.verifyNotEmpty(evaluatedCandidates(1).detectorPlate);
             testCase.verifyTrue(isfield(evaluatedCandidates, "recognitionPath"));
             testCase.verifyEqual(string(evaluatedCandidates(1).recognitionPath), "matlab_ocr");
             testCase.verifyGreaterThan(evaluatedCandidates(2).emptyPenalty, 0);

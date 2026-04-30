@@ -15,6 +15,7 @@ function [selectedCandidateIndex, evaluatedCandidates] = rerankPlateCandidates(i
     for i = 1:numCandidates
         detectorCandidate = localNormalizeCandidate(detectorCandidates(i));
         paddedBBox = localPadBBox(detectorCandidate.bbox, imageSize, config.detection.platePadding);
+        detectorPlate = localDetectorPlate(inputImage, detectorCandidate.bbox);
 
         [rectifiedPlate, rectifyMeta] = rectifyPlate(inputImage, paddedBBox, config);
         [recognizedText, recognitionMeta] = recognizeCharacters(rectifiedPlate, config);
@@ -45,6 +46,7 @@ function [selectedCandidateIndex, evaluatedCandidates] = rerankPlateCandidates(i
             "stateLookupText", stateLookupText, ...
             "stateInfo", stateInfo, ...
             "textLength", strlength(string(recognizedText)), ...
+            "detectorPlate", detectorPlate, ...
             "rectifiedPlate", rectifiedPlate, ...
             "ocrInputPlate", ocrInputPlate, ...
             "rectifyMeta", rectifyMeta, ...
@@ -108,9 +110,15 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         localStructureScore(string(recognizedText), config);
     [framingScore, framingLabel, leftMargin, rightMargin] = ...
         localFramingScore(ocrInputPlate, string(recognizedText));
+    [prefixScore, prefixLabel] = localPrefixPlausibilityScore(string(recognizedText), stateInfo, config);
+    weakOcrFactor = localWeakOcrFactor(recognitionScore, config);
+    ocrTrust = localOcrTrust(recognitionScore, prefixScore, weakOcrFactor);
 
-    confidenceAdjustedRegexScore = min(1, 0.85 * regexScore + 0.15 * recognitionScore);
-    confidenceAdjustedStateScore = min(1, 0.85 * stateScore + 0.15 * recognitionScore);
+    confidenceAdjustedRegexScore = min(1, ocrTrust * (0.85 * regexScore + 0.15 * recognitionScore));
+    confidenceAdjustedStateScore = min(1, ocrTrust * (0.85 * stateScore + 0.15 * recognitionScore));
+    confidenceAdjustedCompositionScore = min(1, ocrTrust * compositionScore);
+    confidenceAdjustedLengthScore = min(1, ocrTrust * lengthScore);
+    confidenceAdjustedStructureScore = min(1, ocrTrust * structureScore);
 
     weights = config.reranking.weights;
     baseScore = weights.detector * detectorScore + ...
@@ -118,9 +126,9 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         weights.recognition * recognitionScore + ...
         weights.regex * confidenceAdjustedRegexScore + ...
         weights.state * confidenceAdjustedStateScore + ...
-        weights.composition * compositionScore + ...
-        weights.length * lengthScore + ...
-        weights.structure * structureScore + ...
+        weights.composition * confidenceAdjustedCompositionScore + ...
+        weights.length * confidenceAdjustedLengthScore + ...
+        weights.structure * confidenceAdjustedStructureScore + ...
         weights.framing * framingScore;
 
     penalty = 0;
@@ -155,6 +163,9 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
     if framingScore < 0.35 && strlength(string(recognizedText)) > 0
         penalty = penalty + config.reranking.weakFramingPenalty;
     end
+    if strlength(string(recognizedText)) > 0 && prefixScore < 0.20
+        penalty = penalty + config.reranking.invalidPrefixPenalty;
+    end
 
     bonus = 0;
     switch regexLabel
@@ -166,6 +177,10 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
     if compositionScore >= 0.85
         bonus = bonus + config.reranking.mixedAlphaDigitBonus;
     end
+    if weakOcrFactor > 0
+        bonus = bonus + weakOcrFactor * config.reranking.weakOcrDetectorBonus * detectorScore;
+        bonus = bonus + weakOcrFactor * config.reranking.weakOcrPlateEvidenceBonus * plateEvidenceScore;
+    end
 
     finalScore = max(0, min(1, baseScore + bonus - penalty));
     scoreBreakdown = struct( ...
@@ -175,12 +190,16 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         "plateContrast", localGetCandidateField(detectorCandidate, "plateContrastScore"), ...
         "componentAlignment", localGetCandidateField(detectorCandidate, "componentAlignmentScore"), ...
         "recognition", recognitionScore, ...
+        "ocrTrust", ocrTrust, ...
+        "weakOcrFactor", weakOcrFactor, ...
         "composition", compositionScore, ...
         "compositionLabel", string(compositionLabel), ...
         "length", lengthScore, ...
         "lengthLabel", string(lengthLabel), ...
         "structure", structureScore, ...
         "structureLabel", string(structureLabel), ...
+        "prefix", prefixScore, ...
+        "prefixLabel", string(prefixLabel), ...
         "prefixLength", prefixLength, ...
         "digitLength", digitLength, ...
         "suffixLength", suffixLength, ...
@@ -316,6 +335,19 @@ function score = localRecognitionScore(recognitionMeta)
     score = max(0, min(1, score));
 end
 
+function weakOcrFactor = localWeakOcrFactor(recognitionScore, config)
+    threshold = double(config.reranking.weakOcrRecognitionThreshold);
+    threshold = max(threshold, eps);
+    weakOcrFactor = max(0, min(1, (threshold - recognitionScore) / threshold));
+end
+
+function trust = localOcrTrust(recognitionScore, prefixScore, weakOcrFactor)
+    baseTrust = max(0.18, min(1, 0.20 + 0.80 * recognitionScore));
+    prefixTrust = 0.30 + 0.70 * max(0, min(1, prefixScore));
+    weakOcrTrust = 1 - 0.55 * weakOcrFactor;
+    trust = max(0.12, min(1, baseTrust * prefixTrust * weakOcrTrust));
+end
+
 function [score, label] = localRegexScore(recognizedText, config)
     normalized = upper(regexprep(string(recognizedText), "[^A-Z0-9]", ""));
     label = "none";
@@ -355,6 +387,34 @@ function score = localStateScore(stateInfo, recognizedText)
         score = 0.20;
     else
         score = 0;
+    end
+end
+
+function [score, label] = localPrefixPlausibilityScore(recognizedText, stateInfo, config)
+    normalized = upper(regexprep(string(recognizedText), "[^A-Z0-9]", ""));
+    label = "empty";
+    score = 0;
+
+    if strlength(normalized) == 0
+        return;
+    end
+
+    if isfield(stateInfo, "matched") && stateInfo.matched
+        score = 1.0;
+        label = "matched_rule";
+        return;
+    end
+
+    prefixRules = config.malaysiaRules(strcmp(string({config.malaysiaRules.matcherType}), "prefix"));
+    knownLeadTokens = unique(string({prefixRules.token}));
+    leadingLetter = extractBefore(normalized, 2);
+
+    if any(leadingLetter == knownLeadTokens)
+        score = 0.62;
+        label = "known_lead";
+    else
+        score = 0.05;
+        label = "invalid_lead";
     end
 end
 
@@ -601,6 +661,18 @@ function plateImage = localRecognitionPlate(recognitionMeta, fallbackPlate)
     end
 end
 
+function plateImage = localDetectorPlate(inputImage, bbox)
+    grayImage = inputImage;
+    if ndims(grayImage) == 3
+        grayImage = im2gray(grayImage);
+    end
+
+    plateImage = imcrop(grayImage, bbox);
+    if isempty(plateImage)
+        plateImage = grayImage;
+    end
+end
+
 function bbox = localPadBBox(bbox, imageSize, paddingRatio)
     paddingX = bbox(3) * paddingRatio;
     paddingY = bbox(4) * paddingRatio;
@@ -629,6 +701,7 @@ function records = localEmptyEvaluatedCandidates()
         "stateLookupText", {}, ...
         "stateInfo", {}, ...
         "textLength", {}, ...
+        "detectorPlate", {}, ...
         "rectifiedPlate", {}, ...
         "ocrInputPlate", {}, ...
         "rectifyMeta", {}, ...

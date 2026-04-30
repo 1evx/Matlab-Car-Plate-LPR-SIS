@@ -30,6 +30,7 @@ function showEvaluatedCandidateDebugFigure(evaluatedCandidates, config)
             '#%d %.3f | Det %.2f Plate %.2f OCR %.2f\n' ...
             'Regex %.2f | State %.2f | Len %.2f\n' ...
             'Struct %.2f | Frame %.2f\n' ...
+            'Left raw detector | Right OCR rectified\n' ...
             '%s | %s | %s\n' ...
             'Text %s'], ...
             i, ...
@@ -52,6 +53,31 @@ function showEvaluatedCandidateDebugFigure(evaluatedCandidates, config)
 end
 
 function imageOut = localDisplayImage(record)
+    detectorImage = localDetectorImage(record);
+    ocrImage = localOcrImage(record);
+
+    detectorImage = localPrepareDisplayImage(detectorImage);
+    ocrImage = localPrepareDisplayImage(ocrImage);
+
+    targetHeight = max(size(detectorImage, 1), size(ocrImage, 1));
+    detectorImage = localResizeToHeight(detectorImage, targetHeight);
+    ocrImage = localResizeToHeight(ocrImage, targetHeight);
+
+    spacer = uint8(235 * ones(targetHeight, 10, 3));
+    imageOut = cat(2, detectorImage, spacer, ocrImage);
+end
+
+function imageOut = localDetectorImage(record)
+    if isfield(record, "detectorPlate") && ~isempty(record.detectorPlate)
+        imageOut = record.detectorPlate;
+    elseif isfield(record, "rectifiedPlate") && ~isempty(record.rectifiedPlate)
+        imageOut = record.rectifiedPlate;
+    else
+        imageOut = zeros(40, 120, "uint8");
+    end
+end
+
+function imageOut = localOcrImage(record)
     if isfield(record, "ocrInputPlate") && ~isempty(record.ocrInputPlate)
         imageOut = record.ocrInputPlate;
     elseif isfield(record, "rectifiedPlate") && ~isempty(record.rectifiedPlate)
@@ -59,6 +85,37 @@ function imageOut = localDisplayImage(record)
     else
         imageOut = zeros(40, 120, "uint8");
     end
+end
+
+function imageOut = localPrepareDisplayImage(imageIn)
+    if isempty(imageIn)
+        imageOut = zeros(40, 120, 3, "uint8");
+        return;
+    end
+
+    if islogical(imageIn)
+        imageOut = uint8(imageIn) * 255;
+    elseif isa(imageIn, "uint8")
+        imageOut = imageIn;
+    elseif isfloat(imageIn)
+        imageOut = im2uint8(mat2gray(imageIn));
+    else
+        imageOut = uint8(imageIn);
+    end
+
+    if ndims(imageOut) == 2
+        imageOut = repmat(imageOut, 1, 1, 3);
+    end
+end
+
+function imageOut = localResizeToHeight(imageIn, targetHeight)
+    if size(imageIn, 1) == targetHeight
+        imageOut = imageIn;
+        return;
+    end
+
+    targetWidth = max(1, round(size(imageIn, 2) * targetHeight / max(size(imageIn, 1), 1)));
+    imageOut = imresize(imageIn, [targetHeight targetWidth], "nearest");
 end
 
 function textOut = localDisplayText(textIn)
