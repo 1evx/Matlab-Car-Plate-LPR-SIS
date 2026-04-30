@@ -133,6 +133,8 @@ function meta = localDescribeTextMask(textMask, referenceGray, config, hints)
         "rowBBoxes", zeros(0, 4), ...
         "textMask", textMask, ...
         "rowCountEstimate", 0);
+    twoRowProjectionMinScore = localRectificationRatio( ...
+        config.rectification, "twoRowProjectionMinScore", 0.50);
 
     boxes = localCollectBoxes(textMask, config);
     if isempty(boxes)
@@ -142,7 +144,7 @@ function meta = localDescribeTextMask(textMask, referenceGray, config, hints)
     [rowGroups, hasTwoRows] = localSplitRows(boxes, textMask, config, hints);
     if hasTwoRows
         directTwoRowScore = localTwoRowMaskScore(rowGroups, boxes, size(textMask));
-        if directTwoRowScore >= double(config.rectification.twoRowProjectionMinScore)
+        if directTwoRowScore >= twoRowProjectionMinScore
             rowBBoxes = localRowBoundingBoxes(rowGroups, size(textMask), config);
             layoutHint = "two_row";
             rowCountEstimate = 2;
@@ -155,7 +157,7 @@ function meta = localDescribeTextMask(textMask, referenceGray, config, hints)
     if ~hasTwoRows
         [projectionRowBBoxes, projectionScore] = localProjectionRowBBoxes(textMask, boxes, config, hints);
         if size(projectionRowBBoxes, 1) >= 2 && ...
-                projectionScore >= double(config.rectification.twoRowProjectionMinScore)
+                projectionScore >= twoRowProjectionMinScore
             rowBBoxes = projectionRowBBoxes;
             layoutHint = "two_row";
             rowCountEstimate = 2;
