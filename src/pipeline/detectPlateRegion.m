@@ -26,14 +26,16 @@ function [bbox, metadata] = detectPlateRegion(grayImage, config)
         [darkRecords, darkMask] = localGenerateDarkCandidates( ...
             scaledGray, grayImage, config, scale);
         [textRecords, textMask] = localGenerateTextClusterCandidates( ...
-            scaledGray, grayImage, config, scale);
+            scaledGray, grayImage, config, scale, "bright", "text_priority");
+        [darkTextRecords, darkTextMask] = localGenerateTextClusterCandidates( ...
+            scaledGray, grayImage, config, scale, "dark", "text_dark_priority");
         [mserRecords, mserMask] = localGenerateMserCandidates( ...
             scaledGray, grayImage, config, scale);
 
         candidateRecords = localAppendBranchCandidates( ...
-            candidateRecords, edgeRecords, priorityEdgeRecords, darkRecords, textRecords, mserRecords);
+            candidateRecords, edgeRecords, priorityEdgeRecords, darkRecords, textRecords, darkTextRecords, mserRecords);
         branchMasks = localUpdateBranchMasks( ...
-            branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask, mserMask, scale);
+            branchMasks, edgeDebug, priorityEdgeDebug, darkMask, textMask | darkTextMask, mserMask, scale);
     end
 
     candidateRecords = localSortAndPruneCandidates( ...
@@ -148,7 +150,7 @@ function [candidateRecords, debug] = localGenerateEdgeCandidates( ...
     openedMask = imopen(closedMask, strel("rectangle", config.detection.openKernel));
     dilatedMask = imdilate(openedMask, strel("rectangle", config.detection.dilateKernel));
     plateMask = imfill(dilatedMask, "holes");
-    plateMask = bwareaopen(plateMask, config.detection.minCandidateAreaPixels);
+    plateMask = bwareaopen(plateMask, localMaskAreaThreshold(size(plateMask), config, 1.00));
 
     candidateRecords = localBuildCandidatesFromMask( ...
         plateMask, scaledGray, originalGray, config, scale, branchName);
@@ -175,7 +177,7 @@ function [candidateRecords, mappedMask] = localGenerateDarkCandidates( ...
         roiMask = imclose(roiMask, strel("rectangle", [5 17]));
         roiMask = imopen(roiMask, strel("rectangle", [3 5]));
         roiMask = imfill(roiMask, "holes");
-        roiMask = bwareaopen(roiMask, config.detection.minCandidateAreaPixels);
+        roiMask = bwareaopen(roiMask, localMaskAreaThreshold(size(roiMask), config, 1.00));
         mask = localPasteRoiMask(mask, roiMask, roiBox);
     end
 
@@ -185,9 +187,16 @@ function [candidateRecords, mappedMask] = localGenerateDarkCandidates( ...
 end
 
 function [candidateRecords, mappedMask] = localGenerateTextClusterCandidates( ...
-        scaledGray, originalGray, config, scale)
+        scaledGray, originalGray, config, scale, polarity, branchName)
     % LOCALGENERATETEXTCLUSTERCANDIDATES Targets high-contrast text regions 
     % by aggressively applying adaptive thresholding to find characters.
+
+    if nargin < 5 || strlength(string(polarity)) == 0
+        polarity = "bright";
+    end
+    if nargin < 6 || strlength(string(branchName)) == 0
+        branchName = "text_priority";
+    end
 
     roiBox = localPriorityBox(size(scaledGray), config);
     mask = false(size(scaledGray));
@@ -196,17 +205,16 @@ function [candidateRecords, mappedMask] = localGenerateTextClusterCandidates( ..
     if ~isempty(roiImage)
         equalizedRoi = adapthisteq(roiImage);
         roiMask = imbinarize( ...
-            equalizedRoi, "adaptive", "ForegroundPolarity", "bright", "Sensitivity", 0.44);
+            equalizedRoi, "adaptive", "ForegroundPolarity", polarity, "Sensitivity", 0.44);
         roiMask = imopen(roiMask, strel("rectangle", config.detection.textClusterOpenKernel));
         roiMask = imclose(roiMask, strel("rectangle", config.detection.textClusterCloseKernel));
         roiMask = imdilate(roiMask, strel("rectangle", config.detection.textClusterDilateKernel));
-        roiMask = bwareaopen( ...
-            roiMask, max(30, round(config.detection.minCandidateAreaPixels * 0.75)));
+        roiMask = bwareaopen(roiMask, localMaskAreaThreshold(size(roiMask), config, 0.65));
         mask = localPasteRoiMask(mask, roiMask, roiBox);
     end
 
     candidateRecords = localBuildCandidatesFromMask( ...
-        mask, scaledGray, originalGray, config, scale, "text_priority");
+        mask, scaledGray, originalGray, config, scale, branchName);
     mappedMask = localMapMaskToOriginal(mask, size(originalGray));
 end
 
@@ -243,7 +251,7 @@ function [candidateRecords, mappedMask] = localGenerateMserCandidates( ...
     markerMask = imdilate(markerMask, strel("rectangle", config.detection.mserSeedDilateKernel));
     mserMask = imclose(markerMask, strel("rectangle", config.detection.mserCloseKernel));
     mserMask = imdilate(mserMask, strel("rectangle", config.detection.mserDilateKernel));
-    mserMask = bwareaopen(mserMask, config.detection.minCandidateAreaPixels);
+    mserMask = bwareaopen(mserMask, localMaskAreaThreshold(size(mserMask), config, 0.75));
     mserMask = localFilterMserMaskByAspect(mserMask, config);
 
     candidateRecords = localBuildCandidatesFromMask( ...
@@ -321,6 +329,8 @@ function mappedBox = localExpandCandidateBoxForBranch(mappedBox, branchName, ima
             mappedBox = localExpandCandidateBox(mappedBox, config.detection.edgePriorityExpand, imageSize);
         case "text_priority"
             mappedBox = localExpandCandidateBox(mappedBox, [1.70 2.20], imageSize);
+        case "text_dark_priority"
+            mappedBox = localExpandCandidateBox(mappedBox, config.detection.textDarkExpand, imageSize);
         case "dark_priority"
             mappedBox = localExpandCandidateBox(mappedBox, [1.25 1.35], imageSize);
         case "mser_text"
@@ -353,6 +363,10 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
     alignmentScore = plateFeatures.componentAlignmentScore;
     textComponentCount = plateFeatures.textComponentCount;
     emptyRegionPenalty = plateFeatures.emptyRegionPenalty;
+    layoutHint = string(plateFeatures.layoutHint);
+    rowCountEstimate = double(plateFeatures.rowCountEstimate);
+    singleLineAlignmentScore = localSafeFeatureValue(plateFeatures, "singleLineAlignmentScore");
+    twoRowAlignmentScore = localSafeFeatureValue(plateFeatures, "twoRowAlignmentScore");
 
     isValid = areaRatio >= config.detection.minAreaRatio && ...
         areaRatio <= config.detection.maxAreaRatio && ...
@@ -374,6 +388,7 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
 
     % Test against different standard plate profiles (e.g., standard vs squarish)
     for profile = config.detection.profiles
+        profileName = string(profile.name);
         aspectFit = localProfileFit( ...
             aspectRatio, profile.targetAspectRatio, profile.minAspectRatio, profile.maxAspectRatio);
         widthFit = localProfileFit( ...
@@ -387,6 +402,11 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         shapeScore = mean([ ...
             localThresholdScore(rectangularity, 0.22, 0.78) ...
             localThresholdScore(solidity, 0.18, 0.85)]);
+        if profileName == "two_row"
+            profileAlignmentScore = max(twoRowAlignmentScore, 0.70 * alignmentScore);
+        else
+            profileAlignmentScore = max(singleLineAlignmentScore, 0.70 * alignmentScore);
+        end
         textureScore = mean([ ...
             localThresholdScore(edgeDensity, 0.04, 0.32) ...
             contrastScore ...
@@ -394,40 +414,47 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         evidenceScore = mean([ ...
             characterTextureScore ...
             plateContrastScore ...
-            alignmentScore]);
+            profileAlignmentScore]);
         branchScore = localBranchScore(branchName, scale);
 
-        countScore = localTextComponentCountScore(textComponentCount);
+        countScore = localTextComponentCountScore(textComponentCount, profileName);
         coverageScore = localTextCoverageScore(candidateMask);
-        splitPenalty = localSplitFragmentPenalty(candidateMask);
+        splitPenalty = localSplitFragmentPenalty(candidateMask, layoutHint, profileName);
         positionScore = localCandidatePositionScore(horizontalCenterRatio, verticalCenterRatio, config);
         spanScore = localCandidateSpanScore(widthRatio, heightRatio, aspectRatio, profile);
-        [textBandScore, edgeClipPenalty] = localTextBandCompletenessScore(candidateImage);
+        [textBandScore, edgeClipPenalty] = localTextBandCompletenessScore(candidateImage, profileName);
+        layoutScore = localLayoutMatchScore(layoutHint, rowCountEstimate, profileName);
+        boundaryPenalty = localBoundaryPenalty(bbox, originalImageSize);
 
         % Final weighted score calculation
-        finalScore = 0.16 * geometryScore + 0.08 * shapeScore + 0.10 * textureScore + ...
+        finalScore = 0.16 * geometryScore + 0.07 * shapeScore + 0.10 * textureScore + ...
             0.08 * branchScore + 0.18 * evidenceScore + ...
-            0.12 * countScore + 0.09 * coverageScore + 0.08 * positionScore + ...
-            0.09 * spanScore + 0.12 * textBandScore - ...
-            0.05 * emptyRegionPenalty - 0.05 * splitPenalty - 0.10 * edgeClipPenalty;
+            0.10 * countScore + 0.08 * coverageScore + 0.07 * positionScore + ...
+            0.08 * spanScore + 0.10 * textBandScore + 0.06 * layoutScore - ...
+            0.04 * emptyRegionPenalty - 0.04 * splitPenalty - 0.08 * edgeClipPenalty - ...
+            0.14 * boundaryPenalty;
 
         if finalScore > bestScore
             bestScore = finalScore;
-            bestProfile = string(profile.name);
+            bestProfile = profileName;
             bestBreakdown = struct( ...
                 "geometry", geometryScore, ...
                 "shape", shapeScore, ...
                 "texture", textureScore, ...
                 "characterTexture", characterTextureScore, ...
                 "plateContrast", plateContrastScore, ...
-                "componentAlignment", alignmentScore, ...
+                "componentAlignment", profileAlignmentScore, ...
                 "textCount", textComponentCount, ...
                 "countScore", countScore, ...
                 "coverageScore", coverageScore, ...
                 "positionScore", positionScore, ...
                 "spanScore", spanScore, ...
+                "layoutScore", layoutScore, ...
+                "layoutHint", layoutHint, ...
+                "rowCountEstimate", rowCountEstimate, ...
                 "textBandScore", textBandScore, ...
                 "edgeClipPenalty", edgeClipPenalty, ...
+                "boundaryPenalty", boundaryPenalty, ...
                 "splitPenalty", splitPenalty, ...
                 "emptyRegionPenalty", emptyRegionPenalty, ...
                 "branch", branchScore, ...
@@ -454,6 +481,8 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         "plateContrastScore", plateContrastScore, ...
         "componentAlignmentScore", alignmentScore, ...
         "textComponentCount", textComponentCount, ...
+        "layoutHint", layoutHint, ...
+        "rowCountEstimate", rowCountEstimate, ...
         "emptyRegionPenalty", emptyRegionPenalty, ...
         "scoreBreakdown", bestBreakdown);
 end
@@ -467,6 +496,8 @@ function score = localBranchScore(branchName, scale)
             base = 0.95;
         case "text_priority"
             base = 1.00;
+        case "text_dark_priority"
+            base = 1.02;
         case "dark_priority"
             base = 0.93;
         case "mser_text"
@@ -513,12 +544,22 @@ function score = localThresholdScore(value, lowTarget, highTarget)
     end
 end
 
-function score = localTextComponentCountScore(textComponentCount)
-    if textComponentCount >= 5 && textComponentCount <= 8
+function score = localTextComponentCountScore(textComponentCount, profileName)
+    if nargin < 2
+        profileName = "single_line";
+    end
+
+    if string(profileName) == "two_row"
+        targetRange = [4 9];
+    else
+        targetRange = [5 8];
+    end
+
+    if textComponentCount >= targetRange(1) && textComponentCount <= targetRange(2)
         score = 1.0;
-    elseif textComponentCount == 4 || textComponentCount == 9
+    elseif textComponentCount == targetRange(1) - 1 || textComponentCount == targetRange(2) + 1
         score = 0.58;
-    elseif textComponentCount == 3 || textComponentCount == 10
+    elseif textComponentCount == targetRange(1) - 2 || textComponentCount == targetRange(2) + 2
         score = 0.28;
     else
         score = 0.10;
@@ -574,7 +615,7 @@ function score = localTextCoverageScore(candidateMask)
     score = max(0, min(1, (coverageRatio - 0.25) / 0.55));
 end
 
-function penalty = localSplitFragmentPenalty(candidateMask)
+function penalty = localSplitFragmentPenalty(candidateMask, layoutHint, profileName)
     mask = logical(candidateMask);
     cc = bwconncomp(mask);
     if cc.NumObjects <= 1
@@ -598,9 +639,21 @@ function penalty = localSplitFragmentPenalty(candidateMask)
     end
 
     penalty = max(0, min(1, 0.7 * (1 - dominantShare) + 0.3 * secondShare));
+    if string(profileName) == "two_row" || string(layoutHint) == "two_row"
+        penalty = 0.40 * penalty;
+    end
 end
 
-function [score, clipPenalty] = localTextBandCompletenessScore(candidateImage)
+function [score, clipPenalty] = localTextBandCompletenessScore(candidateImage, profileName)
+    if nargin >= 2 && string(profileName) == "two_row"
+        [score, clipPenalty] = localTwoRowTextBandScore(candidateImage);
+        return;
+    end
+
+    [score, clipPenalty] = localSingleRowTextBandScore(candidateImage);
+end
+
+function [score, clipPenalty] = localSingleRowTextBandScore(candidateImage)
     score = 0.30;
     clipPenalty = 0;
 
@@ -649,6 +702,90 @@ function [score, clipPenalty] = localTextBandCompletenessScore(candidateImage)
     rightClipPenalty = max(0, (0.025 - rightMargin) / 0.025);
     overSpanPenalty = max(0, (spanRatio - 0.82) / 0.18);
     clipPenalty = max(0, min(1, 0.30 * leftClipPenalty + 0.50 * rightClipPenalty + 0.20 * overSpanPenalty));
+end
+
+function [score, clipPenalty] = localTwoRowTextBandScore(candidateImage)
+    score = 0.22;
+    clipPenalty = 0;
+
+    if isempty(candidateImage)
+        return;
+    end
+
+    grayImage = candidateImage;
+    if ndims(grayImage) == 3
+        grayImage = im2gray(grayImage);
+    end
+    grayImage = im2single(grayImage);
+
+    brightMask = imbinarize(grayImage, "adaptive", ...
+        "ForegroundPolarity", "bright", ...
+        "Sensitivity", 0.42);
+    brightMask = bwareaopen(brightMask, max(4, round(numel(brightMask) * 0.0018)));
+
+    rowProfile = mean(brightMask, 2);
+    positiveRows = rowProfile(rowProfile > 0);
+    if isempty(positiveRows)
+        return;
+    end
+    rowThreshold = max(0.02, 0.55 * mean(positiveRows));
+    activeRows = rowProfile >= rowThreshold;
+    if ~any(activeRows)
+        return;
+    end
+
+    rowRuns = localLogicalRuns(activeRows);
+    if size(rowRuns, 1) < 2
+        [score, clipPenalty] = localSingleRowTextBandScore(candidateImage);
+        score = 0.65 * score;
+        return;
+    end
+
+    runHeights = rowRuns(:, 2) - rowRuns(:, 1) + 1;
+    [~, order] = sort(runHeights, "descend");
+    selectedRuns = sortrows(rowRuns(order(1:2), :), 1);
+
+    topBand = brightMask(selectedRuns(1, 1):selectedRuns(1, 2), :);
+    bottomBand = brightMask(selectedRuns(2, 1):selectedRuns(2, 2), :);
+    [topMargins, topSpan] = localBandMargins(topBand);
+    [bottomMargins, bottomSpan] = localBandMargins(bottomBand);
+
+    rowBalanceScore = max(0, 1 - abs(runHeights(order(1)) - runHeights(order(2))) / max(sum(runHeights(order(1:2))), 1));
+    separation = selectedRuns(2, 1) - selectedRuns(1, 2);
+    separationScore = min(1, separation / max(0.10 * size(grayImage, 1), 1));
+    spanScore = mean([ ...
+        max(0, 1 - abs(topSpan - 0.58) / 0.32) ...
+        max(0, 1 - abs(bottomSpan - 0.58) / 0.32)]);
+    marginScore = mean([ ...
+        min(1, topMargins(1) / 0.03) ...
+        min(1, topMargins(2) / 0.03) ...
+        min(1, bottomMargins(1) / 0.03) ...
+        min(1, bottomMargins(2) / 0.03)]);
+
+    score = max(0, min(1, mean([rowBalanceScore separationScore spanScore marginScore])));
+
+    clipPenalty = max(0, min(1, mean([ ...
+        max(0, (0.015 - topMargins(1)) / 0.015) ...
+        max(0, (0.015 - topMargins(2)) / 0.015) ...
+        max(0, (0.015 - bottomMargins(1)) / 0.015) ...
+        max(0, (0.015 - bottomMargins(2)) / 0.015)])));
+end
+
+function penalty = localBoundaryPenalty(bbox, imageSize)
+    imageHeight = imageSize(1);
+    imageWidth = imageSize(2);
+    leftMargin = max(0, bbox(1) - 1);
+    topMargin = max(0, bbox(2) - 1);
+    rightMargin = max(0, imageWidth - (bbox(1) + bbox(3)));
+    bottomMargin = max(0, imageHeight - (bbox(2) + bbox(4)));
+
+    horizontalThreshold = max(8, round(0.02 * imageWidth));
+    verticalThreshold = max(8, round(0.02 * imageHeight));
+    leftPenalty = max(0, (horizontalThreshold - leftMargin) / max(horizontalThreshold, 1));
+    rightPenalty = max(0, (horizontalThreshold - rightMargin) / max(horizontalThreshold, 1));
+    topPenalty = max(0, (verticalThreshold - topMargin) / max(verticalThreshold, 1));
+    bottomPenalty = max(0, (verticalThreshold - bottomMargin) / max(verticalThreshold, 1));
+    penalty = max(0, min(1, max([leftPenalty rightPenalty 0.7 * topPenalty 0.7 * bottomPenalty])));
 end
 
 function candidateRecords = localSortAndPruneCandidates(candidateRecords, maxCandidatesToKeep)
@@ -732,6 +869,16 @@ function mappedMask = localMapMaskToOriginal(mask, originalSize)
     mappedMask = imresize(logical(mask), originalSize, "nearest");
 end
 
+function threshold = localMaskAreaThreshold(maskSize, config, scaleFactor)
+    if nargin < 3
+        scaleFactor = 1.0;
+    end
+
+    ratioFloor = double(config.detection.minMaskAreaRatio);
+    minPixels = double(config.detection.minCandidateAreaPixels);
+    threshold = max(2, round(max(minPixels * scaleFactor * 0.35, prod(maskSize(1:2)) * ratioFloor * scaleFactor)));
+end
+
 function mappedBox = localMapBoxToOriginal(box, scale, imageSize)
     % LOCALMAPBOXTOORIGINAL Scales bounding box coordinates from a scaled 
     % image back to match the original image size.
@@ -811,8 +958,61 @@ function records = localEmptyCandidateRecords()
         "plateContrastScore", {}, ...
         "componentAlignmentScore", {}, ...
         "textComponentCount", {}, ...
+        "layoutHint", {}, ...
+        "rowCountEstimate", {}, ...
         "emptyRegionPenalty", {}, ...
         "scoreBreakdown", {});
+end
+
+function score = localLayoutMatchScore(layoutHint, rowCountEstimate, profileName)
+    if string(profileName) == "two_row"
+        layoutScore = double(string(layoutHint) == "two_row");
+        rowScore = min(1, max(0, rowCountEstimate - 1));
+        score = max(0, min(1, 0.72 * layoutScore + 0.28 * rowScore));
+    else
+        if string(layoutHint) == "two_row" || rowCountEstimate >= 2
+            score = 0.30;
+        else
+            score = 1.0;
+        end
+    end
+end
+
+function runs = localLogicalRuns(maskVector)
+    maskVector = logical(maskVector(:));
+    runs = zeros(0, 2);
+    if ~any(maskVector)
+        return;
+    end
+
+    changes = diff([false; maskVector; false]);
+    starts = find(changes == 1);
+    ends = find(changes == -1) - 1;
+    runs = [starts ends];
+end
+
+function [margins, spanRatio] = localBandMargins(mask)
+    if isempty(mask) || ~any(mask(:))
+        margins = [0 0];
+        spanRatio = 0;
+        return;
+    end
+
+    columnProfile = mean(mask, 1);
+    activeColumns = columnProfile > 0;
+    firstColumn = find(activeColumns, 1, "first");
+    lastColumn = find(activeColumns, 1, "last");
+    width = size(mask, 2);
+    margins = [(firstColumn - 1) / max(width, 1) (width - lastColumn) / max(width, 1)];
+    spanRatio = (lastColumn - firstColumn + 1) / max(width, 1);
+end
+
+function value = localSafeFeatureValue(features, fieldName)
+    value = 0;
+    if isfield(features, fieldName)
+        value = double(features.(fieldName));
+    end
+    value = max(0, min(1, value));
 end
 
 function bbox = localPadBBox(bbox, imageSize, paddingRatio)

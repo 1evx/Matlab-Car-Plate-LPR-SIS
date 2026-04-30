@@ -53,13 +53,17 @@ function result = runLPRPipeline(imageInput, config)
 
     selectedCandidate = evaluatedCandidates(selectedCandidateIndex);
     plateBBox = selectedCandidate.bbox;
+    displayBBox = plateBBox;
+    if isfield(selectedCandidate, "rawBBox") && ~isempty(selectedCandidate.rawBBox)
+        displayBBox = selectedCandidate.rawBBox;
+    end
     rectifiedPlate = selectedCandidate.rectifiedPlate;
     rectifyMeta = selectedCandidate.rectifyMeta;
     recognizedText = selectedCandidate.recognizedText;
     recognitionMeta = selectedCandidate.recognitionMeta;
     stateInfo = selectedCandidate.stateInfo;
 
-    result.plateBBox = plateBBox;
+    result.plateBBox = displayBBox;
     result.plateScore = selectedCandidate.detectorScore;
     result.plateCrop = rectifyMeta.croppedPlate;
     result.rectifiedPlate = rectifiedPlate;
@@ -80,8 +84,15 @@ function result = runLPRPipeline(imageInput, config)
 
     result.debug.rectifiedBinaryMask = rectifyMeta.binaryMask;
     result.debug.rectifiedAngle = rectifyMeta.angle;
+    result.debug.rectifiedLayoutHint = string(rectifyMeta.layoutHint);
+    result.debug.textOnlyPlate = rectifyMeta.textOnlyPlate;
+    result.debug.textOnlyBBox = rectifyMeta.textOnlyBBox;
+    result.debug.rowBBoxes = rectifyMeta.rowBBoxes;
+    result.debug.rowCompositePlate = rectifyMeta.rowCompositePlate;
     result.debug.recognition = recognitionMeta;
     result.debug.ocrInputPlate = selectedCandidate.ocrInputPlate;
+    result.debug.displayPlateBBox = displayBBox;
+    result.debug.ocrPlateBBox = plateBBox;
     result.debug.evaluatedCandidates = evaluatedCandidates;
     result.debug.selectedCandidateIndex = selectedCandidateIndex;
     result.debug.selectedCandidateReason = selectedCandidate.selectionReason;

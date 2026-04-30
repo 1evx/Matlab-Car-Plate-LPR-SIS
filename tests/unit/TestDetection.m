@@ -24,9 +24,24 @@ classdef TestDetection < matlab.unittest.TestCase
             testCase.verifyTrue(isfield(metadata.candidates, "characterTextureScore"));
             testCase.verifyTrue(isfield(metadata.candidates, "plateContrastScore"));
             testCase.verifyTrue(isfield(metadata.candidates, "componentAlignmentScore"));
+            testCase.verifyTrue(isfield(metadata.candidates, "layoutHint"));
+            testCase.verifyTrue(isfield(metadata.candidates, "rowCountEstimate"));
             testCase.verifyTrue(isfield(metadata.candidates(1).scoreBreakdown, "textBandScore"));
             testCase.verifyTrue(isfield(metadata.candidates(1).scoreBreakdown, "edgeClipPenalty"));
             testCase.verifyFalse(isfield(metadata.candidates, "vehiclePositionScore"));
+        end
+
+        function layoutAwareFeaturesPreferTwoRowEvidence(testCase)
+            [sceneImage, meta] = createSyntheticTwoRowPlateImage("BPK", "1234");
+            plateCrop = imcrop(sceneImage, meta.plateBox);
+            grayPlate = im2gray(plateCrop);
+            candidateMask = imbinarize(grayPlate, "adaptive", "ForegroundPolarity", "dark");
+
+            features = extractPlateFeatures(candidateMask, plateCrop);
+
+            testCase.verifyEqual(string(features.layoutHint), "two_row");
+            testCase.verifyGreaterThanOrEqual(features.rowCountEstimate, 2);
+            testCase.verifyGreaterThan(features.twoRowAlignmentScore, features.singleLineAlignmentScore);
         end
     end
 end
