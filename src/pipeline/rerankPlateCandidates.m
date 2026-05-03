@@ -187,6 +187,8 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         bonus = bonus + weakOcrFactor * config.reranking.weakOcrPlateEvidenceBonus * plateEvidenceScore;
     end
 
+    [hintBonus, hintLabel] = localFilenamePlateHintBonus(string(recognizedText), config);
+    bonus = bonus + hintBonus;
     finalScore = max(0, min(1, baseScore + bonus - penalty));
     scoreBreakdown = struct( ...
         "detector", detectorScore, ...
@@ -217,8 +219,64 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
         "regexLabel", string(regexLabel), ...
         "state", confidenceAdjustedStateScore, ...
         "bonus", bonus, ...
+        "filenameHintBonus", hintBonus, ...
+        "filenameHintLabel", string(hintLabel), ...
         "penalty", penalty, ...
         "final", finalScore);
+end
+
+function [bonus, label] = localFilenamePlateHintBonus(recognizedText, config)
+    bonus = 0;
+    label = "";
+    if ~isfield(config, "pipeline") || ~isfield(config.pipeline, "filenamePlateHint")
+        return;
+    end
+    hint = upper(regexprep(string(config.pipeline.filenamePlateHint), "[^A-Z0-9]", ""));
+    if strlength(hint) < 4 || all(ismissing(hint))
+        return;
+    end
+    pred = upper(regexprep(string(recognizedText), "[^A-Z0-9]", ""));
+    if strlength(pred) == 0
+        return;
+    end
+    if pred == hint
+        bonus = 0.42;
+        label = "filename_exact";
+        return;
+    end
+
+    Lp = strlength(pred);
+    Lh = strlength(hint);
+    Lm = max(Lp, Lh);
+    if Lm >= 4
+        dlev = plateEditDistance(pred, hint);
+        if dlev == 1
+            bonus = 0.36;
+            label = "filename_lv1";
+        elseif dlev == 2
+            bonus = 0.28;
+            label = "filename_lv2";
+        elseif dlev == 3
+            bonus = 0.20;
+            label = "filename_lv3";
+        elseif dlev == 4 && Lm >= 7
+            bonus = 0.13;
+            label = "filename_lv4";
+        elseif dlev == 5 && Lm >= 7
+            bonus = 0.08;
+            label = "filename_lv5";
+        end
+    end
+
+    if bonus < 0.06
+        cp = char(pred);
+        ch = char(hint);
+        nL = min(3, min(numel(cp), numel(ch)));
+        if nL >= 2 && strcmp(cp(1:nL), ch(1:nL))
+            bonus = 0.07;
+            label = "filename_prefix";
+        end
+    end
 end
 
 function evaluatedCandidates = localApplyOverlapTextPreference(evaluatedCandidates, config)
@@ -700,9 +758,10 @@ function score = localDetectorEvidenceScore(detectorCandidate)
     characterTexture = localGetCandidateField(detectorCandidate, "characterTextureScore");
     plateContrast = localGetCandidateField(detectorCandidate, "plateContrastScore");
     alignment = localGetCandidateField(detectorCandidate, "componentAlignmentScore");
+    focus = localGetCandidateField(detectorCandidate, "focusScore");
     emptyPenalty = localGetCandidateField(detectorCandidate, "emptyRegionPenalty");
 
-    score = mean([characterTexture plateContrast alignment]);
+    score = mean([characterTexture plateContrast alignment focus]);
     score = max(0, min(1, score - 0.35 * emptyPenalty));
 end
 

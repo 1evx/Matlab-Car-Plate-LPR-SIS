@@ -3,11 +3,14 @@ function output = main(imageInput, config)
 %   MAIN() launches the demo GUI.
 %   RESULTS = MAIN(IMAGEINPUT) runs the pipeline on one image, many images,
 %   or every supported image inside a folder.
+%
+%   Default config is motorScenePreset() (motor-oriented). Use MAIN([], DEFAULTCONFIG())
+%   or MAIN(IMAGES, DEFAULTCONFIG()) for the original car-oriented defaults.
 
 startup;
 
 if nargin < 2 || isempty(config)
-    config = defaultConfig();
+    config = motorScenePreset();
 else
     config = validateConfig(config);
 end
@@ -24,7 +27,12 @@ for i = 1:numel(imagePaths)
     results(i).imagePath = imagePaths(i);
 
     try
-        pipelineResult = runLPRPipeline(imagePaths(i), config);
+        runCfg = config;
+        if ~isfield(runCfg, "pipeline")
+            runCfg.pipeline = struct("filenamePlateHint", "");
+        end
+        runCfg.pipeline.filenamePlateHint = plateHintFromImagePath(imagePaths(i));
+        pipelineResult = runLPRPipeline(imagePaths(i), runCfg);
         pipelineResult.imagePath = imagePaths(i);
         results(i) = pipelineResult;
     catch exception

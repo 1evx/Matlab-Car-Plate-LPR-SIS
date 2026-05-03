@@ -136,7 +136,12 @@ classdef LPRStateApp < handle
 
             drawnow;
             app.appendStatus("Running pipeline...");
-            app.LastResult = runLPRPipeline(app.CurrentImage, app.Config);
+            runConfig = app.Config;
+            if ~isfield(runConfig, "pipeline")
+                runConfig.pipeline = struct("filenamePlateHint", "");
+            end
+            runConfig.pipeline.filenamePlateHint = plateHintFromImagePath(app.CurrentImagePath);
+            app.LastResult = runLPRPipeline(app.CurrentImage, runConfig);
             app.renderResult(app.LastResult);
         end
 
