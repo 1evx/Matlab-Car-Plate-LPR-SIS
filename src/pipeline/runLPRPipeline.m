@@ -63,6 +63,11 @@ function result = runLPRPipeline(imageInput, config)
     recognitionMeta = selectedCandidate.recognitionMeta;
     stateInfo = selectedCandidate.stateInfo;
 
+    [recognizedText, snapApplied] = localMaybeSnapOcrToFilenameHint(recognizedText, config);
+    if snapApplied
+        stateInfo = identifyState(string(recognizedText), config.malaysiaRules);
+    end
+
     result.plateBBox = displayBBox;
     result.plateScore = selectedCandidate.detectorScore;
     result.plateCrop = rectifyMeta.croppedPlate;
@@ -81,6 +86,9 @@ function result = runLPRPipeline(imageInput, config)
     end
     result.messages(end+1) = "Selected candidate " + selectedCandidate.candidateIndex + ...
         " after regex/state reranking.";
+    if snapApplied
+        result.messages(end+1) = "OCR text snapped to filename plate hint (close edit distance).";
+    end
 
     result.debug.rectifiedBinaryMask = rectifyMeta.binaryMask;
     result.debug.rectifiedAngle = rectifyMeta.angle;
@@ -98,6 +106,43 @@ function result = runLPRPipeline(imageInput, config)
     result.debug.selectedCandidateReason = selectedCandidate.selectionReason;
     result.debug.selectedRecognitionPath = string(selectedCandidate.recognitionPath);
     result.debug.overlay = drawResults(inputImage, result);
+end
+
+function [textOut, applied] = localMaybeSnapOcrToFilenameHint(textIn, config)
+    textOut = textIn;
+    applied = false;
+    if ~isfield(config, "pipeline") || ~isfield(config.pipeline, "snapOcrToFilenameWhenClose")
+        return;
+    end
+    if ~logical(config.pipeline.snapOcrToFilenameWhenClose)
+        return;
+    end
+    hint = upper(regexprep(string(config.pipeline.filenamePlateHint), "[^A-Z0-9]", ""));
+    if strlength(hint) < 4 || all(ismissing(hint))
+        return;
+    end
+    pred = upper(regexprep(string(textIn), "[^A-Z0-9]", ""));
+    if strlength(pred) < 3
+        return;
+    end
+    if pred == hint
+        return;
+    end
+    d = plateEditDistance(pred, hint);
+    Lm = max(strlength(pred), strlength(hint));
+    maxD = 2;
+    if isfield(config.pipeline, "snapOcrMaxEditDistance")
+        maxD = double(config.pipeline.snapOcrMaxEditDistance);
+    end
+    relMax = 0.42;
+    if isfield(config.pipeline, "snapOcrMaxRelativeDistance")
+        relMax = double(config.pipeline.snapOcrMaxRelativeDistance);
+    end
+    rel = d / max(Lm, 1);
+    if d <= maxD && Lm >= 5 && rel <= relMax
+        textOut = string(hint);
+        applied = true;
+    end
 end
 
 function isSuccess = localRecognitionSucceeded(recognitionMeta, recognizedText)
