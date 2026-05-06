@@ -154,6 +154,9 @@ function [scoreBreakdown, finalScore] = localScoreEvaluatedCandidate(detectorCan
     if lengthScore < 0.35 && strlength(string(recognizedText)) > 0
         penalty = penalty + config.reranking.implausibleLengthPenalty;
     end
+    if localHasLeadingZeroDigitBlock(string(recognizedText))
+        penalty = penalty + config.reranking.leadingZeroDigitPenalty;
+    end
     allowSuffixLetter = isfield(config.classification, "allowSuffixLetter") && ...
         logical(config.classification.allowSuffixLetter);
     if prefixLength <= 1 && digitLength >= 3 && leftMargin < 0.02
@@ -513,6 +516,9 @@ function [score, label, prefixLength, digitLength, suffixLength] = localStructur
     densityScore = max(0, min(1, totalLength / max(config.reranking.expectedCharacterRange(1), 1)));
     score = 0.42 * prefixScore + 0.28 * digitScore + 0.12 * suffixScore + ...
         0.10 * orderScore + 0.08 * densityScore;
+    if localHasLeadingZeroDigitBlock(normalized)
+        score = max(0, score - 0.35);
+    end
     score = max(0, min(1, score));
     label = sprintf("P%d-D%d-S%d", prefixLength, digitLength, suffixLength);
 end
@@ -572,6 +578,20 @@ function [prefixLength, digitLength, suffixLength, isOrdered] = localTextShape(n
     orderedLength = prefixLength + digitLength + suffixLength;
     isOrdered = orderedLength == strlength(normalized) && ...
         suffixLength == strlength(suffix);
+end
+
+function hasLeadingZero = localHasLeadingZeroDigitBlock(textValue)
+    normalized = upper(regexprep(string(textValue), "[^A-Z0-9]", ""));
+    [prefixLength, digitLength, ~, isOrdered] = localTextShape(normalized);
+    hasLeadingZero = false;
+    if ~isOrdered || digitLength < 2
+        return;
+    end
+
+    digitBlock = extractBetween(normalized, prefixLength + 1, prefixLength + digitLength);
+    if strlength(digitBlock) > 0 && startsWith(string(digitBlock), "0")
+        hasLeadingZero = true;
+    end
 end
 
 function [score, label, leftMargin, rightMargin] = localFramingScore(plateImage, recognizedText, layoutHint)
