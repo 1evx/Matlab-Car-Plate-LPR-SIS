@@ -94,5 +94,51 @@ classdef TestRecognition < matlab.unittest.TestCase
             testCase.verifyGreaterThanOrEqual(size(preparedImage, 1), size(tinyCrop, 1));
             testCase.verifyGreaterThanOrEqual(size(preparedImage, 2), size(tinyCrop, 2));
         end
+
+        function structuredRepairNormalizesMixedRegionConfusions(testCase)
+            cfg = defaultConfig();
+
+            [repairedText, repairMeta] = repairStructuredPlateText("8PKI23O", cfg, struct( ...
+                "confidence", 0.42, ...
+                "layoutHint", "two_row"));
+
+            testCase.verifyEqual(string(repairedText), "BPK1230");
+            testCase.verifyTrue(repairMeta.changed);
+            testCase.verifyEqual(string(repairMeta.label), "pattern_repair");
+        end
+
+        function structuredRepairKeepsValidPlateText(testCase)
+            cfg = defaultConfig();
+
+            [repairedText, repairMeta] = repairStructuredPlateText("SJ230R", cfg, struct( ...
+                "confidence", 0.91, ...
+                "layoutHint", "single_line"));
+
+            testCase.verifyEqual(string(repairedText), "SJ230R");
+            testCase.verifyFalse(repairMeta.changed);
+        end
+
+        function structuredRepairCanRecoverKnownSpecialPrefix(testCase)
+            cfg = defaultConfig();
+
+            [repairedText, repairMeta] = repairStructuredPlateText("LTI6763", cfg, struct( ...
+                "confidence", 0.48, ...
+                "layoutHint", "single_line", ...
+                "attemptedTexts", ["LTI6763"; "LLUN6763"]));
+
+            testCase.verifyEqual(string(repairedText), "IIUM6763");
+            testCase.verifyTrue(repairMeta.changed);
+        end
+
+        function structuredRepairKeepsAlphaPrefixWhenDigitTailIsShort(testCase)
+            cfg = defaultConfig();
+
+            [repairedText, repairMeta] = repairStructuredPlateText("VEB55", cfg, struct( ...
+                "confidence", 0.58, ...
+                "layoutHint", "two_row"));
+
+            testCase.verifyEqual(string(repairedText), "VEB55");
+            testCase.verifyFalse(repairMeta.changed);
+        end
     end
 end

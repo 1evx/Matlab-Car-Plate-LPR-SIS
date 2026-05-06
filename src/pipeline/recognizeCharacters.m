@@ -81,6 +81,21 @@ function [recognizedText, metadata] = recognizeCharacters(plateImage, config, hi
 
     [bestResult, bestVariantName, bestVariantImage] = localResolveWeakSuffixCandidate( ...
         bestResult, bestVariantName, bestVariantImage, attemptedResults, bestScore, config);
+    [bestResult, bestVariantName, bestVariantImage] = localResolveSupportedAttemptCandidate( ...
+        bestResult, bestVariantName, bestVariantImage, attemptedResults, config, hints);
+
+    [repairedText, repairMeta] = repairStructuredPlateText(bestResult.text, config, struct( ...
+        "confidence", double(bestResult.confidence), ...
+        "layoutHint", localHintLayout(hints), ...
+        "attemptedTexts", localAttemptedTexts(attemptedResults)));
+    if repairMeta.changed
+        bestResult.text = repairedText;
+        if strlength(bestVariantName) > 0
+            bestVariantName = bestVariantName + "+" + repairMeta.label;
+        else
+            bestVariantName = repairMeta.label;
+        end
+    end
 
     [refinedText, refinementLabel] = localRefineRecognizedText(bestResult.text, bestResult.confidence, config);
     if strlength(refinementLabel) > 0
@@ -112,6 +127,7 @@ function [recognizedText, metadata] = recognizeCharacters(plateImage, config, hi
         "preparedPlateImage", bestVariantImage, ...
         "layoutHint", localHintLayout(hints), ...
         "attemptedResults", {attemptedResults}, ...
+        "structuredRepair", repairMeta, ...
         "matlabOcr", bestResult);
 end
 
@@ -120,12 +136,15 @@ function variants = localOcrVariants(plateImage, config, hints)
     preparedImage = prepareTesseractPlateImage(plateImage, config);
     invgrayImage = imcomplement(grayImage);
     binaryImage = localAdaptiveBinary(grayImage, "bright");
+    darkBinaryImage = localAdaptiveBinary(grayImage, "dark");
 
     variants = struct("name", {}, "layout", {}, "image", {}, "source", {});
     variants = localAppendVariant(variants, "raw_line", "Line", plateImage, "full_plate");
     variants = localAppendVariant(variants, "gray_line", "Line", grayImage, "full_plate");
     variants = localAppendVariant(variants, "binary_line", "Line", binaryImage, "full_plate");
+    variants = localAppendVariant(variants, "darkbinary_line", "Line", darkBinaryImage, "full_plate");
     variants = localAppendVariant(variants, "invgray_line", "Line", invgrayImage, "full_plate");
+    variants = localAppendVariant(variants, "prepared_line", "Line", preparedImage, "full_plate");
     variants = localAppendVariant(variants, "raw_block", "Block", plateImage, "full_plate");
     variants = localAppendVariant(variants, "gray_block", "Block", grayImage, "full_plate");
     variants = localAppendVariant(variants, "invgray_block", "Block", invgrayImage, "full_plate");
@@ -137,6 +156,7 @@ function variants = localOcrVariants(plateImage, config, hints)
         textOnlyGray = localGrayPlate(textOnlyPlate);
         textOnlyPrepared = prepareTesseractPlateImage(textOnlyPlate, config);
         textOnlyBinary = localAdaptiveBinary(textOnlyGray, "bright");
+        textOnlyDarkBinary = localAdaptiveBinary(textOnlyGray, "dark");
         textOnlyInv = imcomplement(textOnlyGray);
         textOnlyLeftTrimGray = localTrimPlateColumns(textOnlyGray, ...
             double(config.rectification.textVariantLeftTrimRatio), 0);
@@ -147,6 +167,8 @@ function variants = localOcrVariants(plateImage, config, hints)
 
         variants = localAppendVariant(variants, "textonly_line", "Line", textOnlyGray, "text_only");
         variants = localAppendVariant(variants, "textonly_binary_line", "Line", textOnlyBinary, "text_only");
+        variants = localAppendVariant(variants, "textonly_darkbinary_line", "Line", textOnlyDarkBinary, "text_only");
+        variants = localAppendVariant(variants, "textonly_prepared_line", "Line", textOnlyPrepared, "text_only");
         variants = localAppendVariant(variants, "textonly_block", "Block", textOnlyGray, "text_only");
         variants = localAppendVariant(variants, "textonly_inv_block", "Block", textOnlyInv, "text_only");
         variants = localAppendVariant(variants, "textonly_prepared_block", "Block", textOnlyPrepared, "text_only");
@@ -161,10 +183,14 @@ function variants = localOcrVariants(plateImage, config, hints)
         rowCompositeGray = localGrayPlate(rowCompositePlate);
         rowCompositePrepared = prepareTesseractPlateImage(rowCompositePlate, config);
         rowCompositeBinary = localAdaptiveBinary(rowCompositeGray, "dark");
+        rowCompositeInv = imcomplement(rowCompositeGray);
 
         variants = localAppendVariant(variants, "rowcomposite_line", "Line", rowCompositeGray, "row_composite");
         variants = localAppendVariant(variants, "rowcomposite_binary_line", "Line", rowCompositeBinary, "row_composite");
         variants = localAppendVariant(variants, "rowcomposite_prepared_line", "Line", rowCompositePrepared, "row_composite");
+        variants = localAppendVariant(variants, "rowcomposite_block", "Block", rowCompositeGray, "row_composite");
+        variants = localAppendVariant(variants, "rowcomposite_inv_block", "Block", rowCompositeInv, "row_composite");
+        variants = localAppendVariant(variants, "rowcomposite_prepared_block", "Block", rowCompositePrepared, "row_composite");
         variants = localAppendVariant(variants, "rowcomposite_word", "Word", rowCompositePrepared, "row_composite");
     end
 end
@@ -251,11 +277,20 @@ function [hybridResult, attemptRecord] = localHybridTwoRowCandidate(bestResult, 
 end
 
 function [chosenResult, chosenImage, chosenName] = localBestRowResult(rowImage, rowIndex, config, hints)
+    grayRowImage = localGrayPlate(rowImage);
     preparedRowImage = prepareTesseractPlateImage(rowImage, config);
+    binaryDarkRowImage = localAdaptiveBinary(grayRowImage, "dark");
+    binaryBrightRowImage = localAdaptiveBinary(grayRowImage, "bright");
+    invGrayRowImage = imcomplement(grayRowImage);
 
     candidateSpecs = { ...
-        struct("name", "gray_line", "image", rowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet); ...
-        struct("name", "prepared_word", "image", preparedRowImage, "layoutAnalysis", "word", "textLayout", "Word", "characterSet", config.classification.matlabOcrCharacterSet) ...
+        struct("name", "gray_line", "image", grayRowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "gray_word", "image", grayRowImage, "layoutAnalysis", "word", "textLayout", "Word", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "prepared_line", "image", preparedRowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "prepared_word", "image", preparedRowImage, "layoutAnalysis", "word", "textLayout", "Word", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "binary_dark_line", "image", binaryDarkRowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "binary_bright_line", "image", binaryBrightRowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet); ...
+        struct("name", "invgray_line", "image", invGrayRowImage, "layoutAnalysis", "line", "textLayout", "Line", "characterSet", config.classification.matlabOcrCharacterSet) ...
     };
 
     if localHintLayout(hints) == "two_row"
@@ -263,6 +298,18 @@ function [chosenResult, chosenImage, chosenName] = localBestRowResult(rowImage, 
             candidateSpecs{end + 1} = struct( ...
                 "name", "letters_line", ...
                 "image", preparedRowImage, ...
+                "layoutAnalysis", "line", ...
+                "textLayout", "Line", ...
+                "characterSet", "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+            candidateSpecs{end + 1} = struct( ...
+                "name", "letters_word", ...
+                "image", preparedRowImage, ...
+                "layoutAnalysis", "word", ...
+                "textLayout", "Word", ...
+                "characterSet", "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+            candidateSpecs{end + 1} = struct( ...
+                "name", "letters_binary_line", ...
+                "image", binaryDarkRowImage, ...
                 "layoutAnalysis", "line", ...
                 "textLayout", "Line", ...
                 "characterSet", "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
@@ -275,7 +322,25 @@ function [chosenResult, chosenImage, chosenName] = localBestRowResult(rowImage, 
                 "characterSet", "0123456789");
             candidateSpecs{end + 1} = struct( ...
                 "name", "digits_line", ...
-                "image", rowImage, ...
+                "image", grayRowImage, ...
+                "layoutAnalysis", "line", ...
+                "textLayout", "Line", ...
+                "characterSet", "0123456789");
+            candidateSpecs{end + 1} = struct( ...
+                "name", "digits_prepared_line", ...
+                "image", preparedRowImage, ...
+                "layoutAnalysis", "line", ...
+                "textLayout", "Line", ...
+                "characterSet", "0123456789");
+            candidateSpecs{end + 1} = struct( ...
+                "name", "digits_binary_word", ...
+                "image", binaryDarkRowImage, ...
+                "layoutAnalysis", "word", ...
+                "textLayout", "Word", ...
+                "characterSet", "0123456789");
+            candidateSpecs{end + 1} = struct( ...
+                "name", "digits_binary_line", ...
+                "image", binaryDarkRowImage, ...
                 "layoutAnalysis", "line", ...
                 "textLayout", "Line", ...
                 "characterSet", "0123456789");
@@ -284,7 +349,7 @@ function [chosenResult, chosenImage, chosenName] = localBestRowResult(rowImage, 
 
     bestScore = -inf;
     chosenResult = struct("text", "", "confidence", 0, "success", false, "errorMessage", "");
-    chosenImage = rowImage;
+    chosenImage = grayRowImage;
     chosenName = "gray_line";
 
     for i = 1:numel(candidateSpecs)
@@ -294,14 +359,64 @@ function [chosenResult, chosenImage, chosenName] = localBestRowResult(rowImage, 
         rowConfig.classification.matlabOcrTextLayout = string(spec.textLayout);
         rowConfig.classification.matlabOcrCharacterSet = string(spec.characterSet);
         rowResult = runMatlabOCR(spec.image, rowConfig);
-        rowText = localNormalizeOcrText(rowResult.text);
-        rowScore = localRowResultScore(rowText, rowResult, rowIndex, hints);
+        rowText = localNormalizeRowTextByExpectation(rowResult.text, rowIndex, hints);
+        rowResult.text = rowText;
+        rowResult.success = strlength(rowText) > 0;
+        rowScore = localRowResultScore(rowText, rowResult, rowIndex, hints) + ...
+            localRowVariantPreference(spec.name, rowIndex, hints);
         if rowScore > bestScore
             bestScore = rowScore;
             chosenResult = rowResult;
             chosenImage = spec.image;
             chosenName = string(spec.name);
         end
+    end
+end
+
+function normalizedText = localNormalizeRowTextByExpectation(rowText, rowIndex, hints)
+    normalizedText = localNormalizeOcrText(rowText);
+    if localHintLayout(hints) ~= "two_row" || strlength(normalizedText) == 0
+        return;
+    end
+
+    chars = char(normalizedText);
+    for i = 1:numel(chars)
+        if rowIndex == 1
+            chars(i) = localAlphaRegionChar(chars(i));
+        else
+            chars(i) = localDigitRegionChar(chars(i));
+        end
+    end
+
+    normalizedText = string(chars);
+    if rowIndex == 1
+        normalizedText = regexprep(normalizedText, "[^A-Z]", "");
+    else
+        normalizedText = regexprep(normalizedText, "[^0-9]", "");
+    end
+end
+
+function bonus = localRowVariantPreference(specName, rowIndex, hints)
+    bonus = 0;
+    if localHintLayout(hints) ~= "two_row"
+        return;
+    end
+
+    specName = string(specName);
+    if rowIndex == 1
+        if contains(specName, "letters")
+            bonus = bonus + 0.08;
+        end
+    else
+        if contains(specName, "digits")
+            bonus = bonus + 0.10;
+        end
+    end
+
+    if contains(specName, "prepared")
+        bonus = bonus + 0.03;
+    elseif contains(specName, "binary")
+        bonus = bonus + 0.02;
     end
 end
 
@@ -320,11 +435,13 @@ function score = localRowResultScore(rowText, rowResult, rowIndex, hints)
     if localHintLayout(hints) == "two_row"
         if rowIndex == 1
             score = score + 0.35 * double(letterCount == totalCount) + ...
-                0.10 * double(totalCount >= 1 && totalCount <= 4) - ...
+                0.16 * double(totalCount >= 1 && totalCount <= 4) - ...
+                0.18 * double(totalCount > 4) - ...
                 0.20 * double(digitCount > 0);
         elseif rowIndex == 2
             score = score + 0.40 * double(digitCount == totalCount) + ...
-                0.18 * double(totalCount >= 1 && totalCount <= 4) - ...
+                0.24 * double(totalCount >= 1 && totalCount <= 4) - ...
+                0.20 * double(totalCount > 4) - ...
                 0.24 * double(letterCount > 0);
         end
     end
@@ -500,6 +617,9 @@ function score = localOcrCandidateScore(text, confidence, success, config)
     if prefixLength == 0 && digitCount > 0
         shortPenalty = shortPenalty + 0.12;
     end
+    if localHasLeadingZeroDigitBlock(normalized)
+        shortPenalty = shortPenalty + 0.12;
+    end
 
     exactNoSuffixBonus = 0;
     if suffixLength == 0 && isOrdered && prefixLength >= 1 && prefixLength <= 4 && ...
@@ -555,6 +675,14 @@ function metadata = localEmptyMetadata(plateImage, hints)
         "preparedPlateImage", plateImage, ...
         "layoutHint", localHintLayout(hints), ...
         "attemptedResults", {cell(0, 1)}, ...
+        "structuredRepair", struct( ...
+            "changed", false, ...
+            "label", "", ...
+            "originalText", "", ...
+            "selectedText", "", ...
+            "originalScore", 0, ...
+            "selectedScore", 0, ...
+            "editCount", 0), ...
         "matlabOcr", struct( ...
             "success", false, ...
             "text", "", ...
@@ -569,6 +697,44 @@ end
 
 function normalizedText = localNormalizeOcrText(text)
     normalizedText = upper(regexprep(string(text), "[^A-Z0-9]", ""));
+end
+
+function outputChar = localAlphaRegionChar(inputChar)
+    outputChar = upper(char(inputChar));
+    switch outputChar
+        case '0'
+            outputChar = 'O';
+        case '1'
+            outputChar = 'I';
+        case '2'
+            outputChar = 'Z';
+        case '5'
+            outputChar = 'S';
+        case '6'
+            outputChar = 'G';
+        case '7'
+            outputChar = 'T';
+        case '8'
+            outputChar = 'B';
+    end
+end
+
+function outputChar = localDigitRegionChar(inputChar)
+    outputChar = upper(char(inputChar));
+    switch outputChar
+        case {'O', 'Q', 'D', 'U'}
+            outputChar = '0';
+        case {'I', 'L', 'T'}
+            outputChar = '1';
+        case 'Z'
+            outputChar = '2';
+        case 'S'
+            outputChar = '5';
+        case 'G'
+            outputChar = '6';
+        case 'B'
+            outputChar = '8';
+    end
 end
 
 function canonicalText = localCanonicalizeOcrText(text, config)
@@ -734,6 +900,174 @@ function [bestResult, bestVariantName, bestVariantImage] = localResolveWeakSuffi
     end
 end
 
+function attemptedTexts = localAttemptedTexts(attemptedResults)
+    attemptedTexts = strings(0, 1);
+    for i = 1:numel(attemptedResults)
+        attempt = attemptedResults{i};
+        if ~isstruct(attempt) || ~isfield(attempt, "result") || ~isstruct(attempt.result)
+            continue;
+        end
+
+        candidateText = localNormalizeOcrText(attempt.result.text);
+        if strlength(candidateText) == 0
+            continue;
+        end
+        attemptedTexts(end + 1, 1) = candidateText; %#ok<AGROW>
+    end
+end
+
+function [bestResult, bestVariantName, bestVariantImage] = localResolveSupportedAttemptCandidate( ...
+        bestResult, bestVariantName, bestVariantImage, attemptedResults, config, hints)
+    normalizedBest = localCanonicalizeOcrText(localNormalizeOcrText(bestResult.text), config);
+    if strlength(normalizedBest) == 0 || numel(attemptedResults) == 0
+        return;
+    end
+
+    if localHintLayout(hints) ~= "two_row"
+        return;
+    end
+
+    [bestPrefixLength, bestDigitLength, bestSuffixLength, bestOrdered] = localOcrTextShape(normalizedBest);
+    if ~bestOrdered || bestDigitLength < 3 || bestPrefixLength < 2 || bestSuffixLength > 1
+        return;
+    end
+
+    bestDigitBlock = extractBetween(normalizedBest, bestPrefixLength + 1, bestPrefixLength + bestDigitLength);
+    bestSupport = localAttemptTextSupport(normalizedBest, attemptedResults, config);
+    bestStatePriority = localStatePriority(identifyState(normalizedBest, config.malaysiaRules));
+
+    preferredText = normalizedBest;
+    preferredSupport = bestSupport;
+    preferredScore = -inf;
+    preferredResult = struct([]);
+    preferredName = "";
+    preferredImage = [];
+
+    for i = 1:numel(attemptedResults)
+        attempt = attemptedResults{i};
+        if ~isstruct(attempt) || ~isfield(attempt, "result") || ~isstruct(attempt.result)
+            continue;
+        end
+
+        candidateText = localCanonicalizeOcrText(localNormalizeOcrText(attempt.result.text), config);
+        if strlength(candidateText) == 0 || candidateText == normalizedBest
+            continue;
+        end
+
+        [candidatePrefixLength, candidateDigitLength, candidateSuffixLength, candidateOrdered] = localOcrTextShape(candidateText);
+        if ~candidateOrdered || candidateSuffixLength > 1 || ...
+                candidatePrefixLength ~= bestPrefixLength || candidateDigitLength ~= bestDigitLength
+            continue;
+        end
+
+        candidateDigitBlock = extractBetween(candidateText, candidatePrefixLength + 1, candidatePrefixLength + candidateDigitLength);
+        if candidateDigitBlock ~= bestDigitBlock
+            continue;
+        end
+
+        if localEditCount(normalizedBest, candidateText) ~= 1
+            continue;
+        end
+
+        if isempty(regexp(char(candidateText), "^[A-Z]{1,4}[0-9]{3,4}[A-Z]?$", "once"))
+            continue;
+        end
+
+        candidatePriority = localStatePriority(identifyState(candidateText, config.malaysiaRules));
+        if candidatePriority + 5 < bestStatePriority
+            continue;
+        end
+
+        candidateSupport = localAttemptTextSupport(candidateText, attemptedResults, config);
+        if candidateSupport < 1.5 || candidateSupport <= (bestSupport + 0.45)
+            continue;
+        end
+
+        candidateScore = candidateSupport + 0.10 * min(1, candidatePriority / 100);
+        if candidateScore > preferredScore
+            preferredText = candidateText;
+            preferredSupport = candidateSupport;
+            preferredScore = candidateScore;
+            preferredResult = attempt.result;
+            preferredResult.text = candidateText;
+            if isfield(attempt, "name")
+                preferredName = string(attempt.name);
+            end
+            if isfield(attempt, "image")
+                preferredImage = attempt.image;
+            end
+        end
+    end
+
+    if preferredText == normalizedBest || preferredSupport <= bestSupport || isempty(preferredResult)
+        return;
+    end
+
+    bestResult = preferredResult;
+    bestResult.text = preferredText;
+    if strlength(preferredName) > 0
+        bestVariantName = preferredName + "+attempt_support";
+    elseif strlength(bestVariantName) > 0
+        bestVariantName = bestVariantName + "+attempt_support";
+    else
+        bestVariantName = "attempt_support";
+    end
+    if ~isempty(preferredImage)
+        bestVariantImage = preferredImage;
+    end
+end
+
+function supportScore = localAttemptTextSupport(candidateText, attemptedResults, config)
+    supportScore = 0;
+    normalizedTarget = localCanonicalizeOcrText(localNormalizeOcrText(candidateText), config);
+    for i = 1:numel(attemptedResults)
+        attempt = attemptedResults{i};
+        if ~isstruct(attempt) || ~isfield(attempt, "result") || ~isstruct(attempt.result)
+            continue;
+        end
+
+        attemptText = localCanonicalizeOcrText(localNormalizeOcrText(attempt.result.text), config);
+        if attemptText ~= normalizedTarget
+            continue;
+        end
+
+        supportScore = supportScore + localAttemptSupportWeight(attempt);
+    end
+end
+
+function weight = localAttemptSupportWeight(attempt)
+    weight = 0.35;
+    sourceValue = "";
+    nameValue = "";
+    if isfield(attempt, "source")
+        sourceValue = string(attempt.source);
+    end
+    if isfield(attempt, "name")
+        nameValue = string(attempt.name);
+    end
+
+    switch sourceValue
+        case "text_only"
+            weight = 1.00;
+        case "text_only_trimmed"
+            weight = 0.75;
+        case "full_plate"
+            weight = 0.70;
+        case "row_composite"
+            weight = 0.30;
+        case {"rowwise_combo", "hybrid_two_row"}
+            weight = 0.25;
+    end
+
+    if startsWith(nameValue, "textonly_")
+        weight = max(weight, 0.85);
+    elseif startsWith(nameValue, "rowcomposite_")
+        weight = min(weight, 0.30);
+    elseif nameValue == "rowwise_combo" || nameValue == "hybrid_two_row"
+        weight = min(weight, 0.25);
+    end
+end
+
 function [refinedText, refinementLabel] = localRefineRecognizedText(textValue, confidenceValue, config)
     refinedText = upper(regexprep(string(textValue), "[^A-Z0-9]", ""));
     refinementLabel = "";
@@ -780,12 +1114,15 @@ function [refinedText, refinementLabel] = localRefineRecognizedText(textValue, c
         leadingTrim = extractAfter(refinedText, 1);
         trimmedState = identifyState(leadingTrim, config.malaysiaRules);
         trimmedPriority = localStatePriority(trimmedState);
+        leadingScore = localRefinementScore(leadingTrim, trimmedPriority, config);
         if trimmedPriority > originalPriority
-            leadingScore = localRefinementScore(leadingTrim, trimmedPriority, config);
             if leadingScore > bestScore + 0.04
                 refinedText = leadingTrim;
                 refinementLabel = "trim_head";
             end
+        elseif trimmedPriority == originalPriority && leadingScore > bestScore + 0.02
+            refinedText = leadingTrim;
+            refinementLabel = "trim_head";
         end
     end
 end
@@ -820,8 +1157,24 @@ function score = localRefinementScore(textValue, statePriority, config)
         0.25 * double(prefixLength >= 1 && prefixLength <= 4) + ...
         0.25 * double(digitLength >= 1 && digitLength <= 4) + ...
         0.20 * double(suffixLength <= 1);
+    if localHasLeadingZeroDigitBlock(normalized)
+        structureScore = max(0, structureScore - 0.35);
+    end
     stateScore = min(1, statePriority / 100);
     score = 0.42 * regexScore + 0.24 * lengthScore + 0.20 * structureScore + 0.14 * stateScore;
+end
+
+function hasLeadingZero = localHasLeadingZeroDigitBlock(normalized)
+    [prefixLength, digitLength, ~, isOrdered] = localOcrTextShape(normalized);
+    hasLeadingZero = false;
+    if ~isOrdered || digitLength < 2
+        return;
+    end
+
+    digitBlock = extractBetween(normalized, prefixLength + 1, prefixLength + digitLength);
+    if strlength(digitBlock) > 0 && startsWith(string(digitBlock), "0")
+        hasLeadingZero = true;
+    end
 end
 
 function priority = localStatePriority(stateInfo)
@@ -829,4 +1182,12 @@ function priority = localStatePriority(stateInfo)
     if isstruct(stateInfo) && isfield(stateInfo, "matchedPriority")
         priority = double(stateInfo.matchedPriority);
     end
+end
+
+function editCount = localEditCount(sourceText, candidateText)
+    sourceChars = char(string(sourceText));
+    candidateChars = char(string(candidateText));
+    comparedLength = min(numel(sourceChars), numel(candidateChars));
+    editCount = sum(sourceChars(1:comparedLength) ~= candidateChars(1:comparedLength)) + ...
+        abs(numel(sourceChars) - numel(candidateChars));
 end

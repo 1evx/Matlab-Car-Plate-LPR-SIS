@@ -141,6 +141,11 @@ function meta = localDescribeTextMask(textMask, referenceGray, config, hints)
         return;
     end
 
+    boxes = localSelectBestTextCluster(boxes, textMask, hints);
+    if isempty(boxes)
+        return;
+    end
+
     [rowGroups, hasTwoRows] = localSplitRows(boxes, textMask, config, hints);
     if hasTwoRows
         directTwoRowScore = localTwoRowMaskScore(rowGroups, boxes, size(textMask));
@@ -178,6 +183,95 @@ function meta = localDescribeTextMask(textMask, referenceGray, config, hints)
     meta.textOnlyBBox = textOnlyBBox;
     meta.rowBBoxes = rowBBoxes;
     meta.rowCountEstimate = rowCountEstimate;
+end
+
+function selectedBoxes = localSelectBestTextCluster(boxes, textMask, hints)
+    selectedBoxes = boxes;
+    if size(boxes, 1) < 3
+        return;
+    end
+
+    if ~localExpectedTwoRow(hints)
+        return;
+    end
+
+    [clusters, clusterIndex] = localHorizontalClusters(boxes); %#ok<ASGLU>
+    if numel(clusters) <= 1
+        return;
+    end
+
+    bestScore = -inf;
+    bestCluster = boxes;
+
+    for i = 1:numel(clusters)
+        clusterBoxes = clusters{i};
+        clusterBox = localUnionBox(clusterBoxes);
+        widthRatio = clusterBox(3) / max(size(textMask, 2), 1);
+        heightRatio = clusterBox(4) / max(size(textMask, 1), 1);
+        areaScore = min(1, sum(clusterBoxes(:, 3) .* clusterBoxes(:, 4)) / ...
+            max(clusterBox(3) * clusterBox(4), 1));
+        componentScore = min(1, size(clusterBoxes, 1) / 6);
+        widthScore = max(0, 1 - abs(widthRatio - 0.30) / 0.32);
+        heightScore = max(0, 1 - abs(heightRatio - 0.48) / 0.40);
+        xCenter = clusterBox(1) + clusterBox(3) / 2;
+        centerScore = max(0, 1 - abs(xCenter - size(textMask, 2) / 2) / max(0.55 * size(textMask, 2), 1));
+
+        rowScore = 0.45;
+        [rowGroups, hasTwoRows] = localProjectionRowSplit(clusterBoxes, textMask, struct(), struct("layoutHint", "two_row")); %#ok<ASGLU>
+        if hasTwoRows
+            rowScore = 1.0;
+        else
+            rowScore = 0.28;
+        end
+
+        clusterScore = 0.28 * componentScore + 0.24 * areaScore + 0.20 * widthScore + ...
+            0.14 * heightScore + 0.08 * centerScore + 0.06 * rowScore;
+        if clusterScore > bestScore
+            bestScore = clusterScore;
+            bestCluster = clusterBoxes;
+        end
+    end
+
+    selectedBoxes = bestCluster;
+end
+
+function [clusters, clusterIndex] = localHorizontalClusters(boxes)
+    clusters = {};
+    clusterIndex = zeros(size(boxes, 1), 1);
+    if isempty(boxes)
+        return;
+    end
+
+    [~, order] = sort(boxes(:, 1), "ascend");
+    sortedBoxes = boxes(order, :);
+    sortedEnds = sortedBoxes(:, 1) + sortedBoxes(:, 3);
+    medianWidth = median(sortedBoxes(:, 3));
+    gapThreshold = max(4, 0.85 * medianWidth);
+
+    currentCluster = sortedBoxes(1, :);
+    currentIndices = order(1);
+    currentEnd = sortedEnds(1);
+    clusterCount = 0;
+
+    for i = 2:size(sortedBoxes, 1)
+        gap = sortedBoxes(i, 1) - currentEnd;
+        if gap <= gapThreshold
+            currentCluster(end + 1, :) = sortedBoxes(i, :); %#ok<AGROW>
+            currentIndices(end + 1, 1) = order(i); %#ok<AGROW>
+            currentEnd = max(currentEnd, sortedEnds(i));
+        else
+            clusterCount = clusterCount + 1;
+            clusters{clusterCount, 1} = currentCluster; %#ok<AGROW>
+            clusterIndex(currentIndices) = clusterCount;
+            currentCluster = sortedBoxes(i, :);
+            currentIndices = order(i);
+            currentEnd = sortedEnds(i);
+        end
+    end
+
+    clusterCount = clusterCount + 1;
+    clusters{clusterCount, 1} = currentCluster;
+    clusterIndex(currentIndices) = clusterCount;
 end
 
 function [rowBBoxes, score] = localProjectionRowBBoxes(textMask, boxes, config, hints)
@@ -596,20 +690,117 @@ function trimmedImage = localTrimRowImage(rowImage)
     brightMask = imbinarize(grayImage, "adaptive", "ForegroundPolarity", "bright", "Sensitivity", 0.42);
     darkMask = imbinarize(grayImage, "adaptive", "ForegroundPolarity", "dark", "Sensitivity", 0.42);
     textMask = bwareaopen(brightMask | darkMask, max(2, round(numel(grayImage) * 0.0015)));
+    cropBox = localBestRowCropBox(textMask);
+    if isempty(cropBox)
+        return;
+    end
+
+    trimmedImage = imcrop(rowImage, cropBox);
+end
+
+function cropBox = localBestRowCropBox(textMask)
+    cropBox = [];
+    if isempty(textMask) || ~any(textMask(:))
+        return;
+    end
+
+    textMask = logical(textMask);
     columnProfile = mean(textMask, 1);
-    activeColumns = find(columnProfile > 0);
-    if isempty(activeColumns)
+    positiveColumns = columnProfile(columnProfile > 0);
+    if isempty(positiveColumns)
         return;
     end
 
-    padding = max(1, round(0.03 * size(grayImage, 2)));
-    startColumn = max(1, activeColumns(1) - padding);
-    endColumn = min(size(grayImage, 2), activeColumns(end) + padding);
-    if endColumn <= startColumn + 2
+    activeColumns = columnProfile >= max(0.02, 0.40 * mean(positiveColumns));
+    columnRuns = localLogicalRuns(activeColumns);
+    if isempty(columnRuns)
+        return;
+    end
+    bestScore = -inf;
+    bestBox = [];
+    imageHeight = size(textMask, 1);
+    imageWidth = size(textMask, 2);
+    columnRuns = localMergeRuns(columnRuns, max(2, round(0.08 * imageWidth)));
+    stats = regionprops("table", textMask, "BoundingBox", "Area");
+
+    for i = 1:size(columnRuns, 1)
+        x1 = columnRuns(i, 1);
+        x2 = columnRuns(i, 2);
+        if (x2 - x1 + 1) < 3
+            continue;
+        end
+
+        runMask = textMask(:, x1:x2);
+        if ~any(runMask(:))
+            continue;
+        end
+
+        rowProfile = mean(runMask, 2);
+        activeRows = rowProfile >= max(0.02, 0.35 * mean(rowProfile(rowProfile > 0)));
+        rowRuns = localLogicalRuns(activeRows);
+        if isempty(rowRuns)
+            continue;
+        end
+
+        y1 = rowRuns(1, 1);
+        y2 = rowRuns(end, 2);
+        runWidth = x2 - x1 + 1;
+        runHeight = y2 - y1 + 1;
+        widthRatio = runWidth / max(imageWidth, 1);
+        heightRatio = runHeight / max(imageHeight, 1);
+        density = nnz(runMask(y1:y2, :)) / max(runWidth * runHeight, 1);
+
+        componentCount = 0;
+        for j = 1:height(stats)
+            box = stats.BoundingBox(j, :);
+            boxCenterX = box(1) + box(3) / 2;
+            if boxCenterX >= x1 && boxCenterX <= x2
+                componentCount = componentCount + 1;
+            end
+        end
+
+        widthScore = max(0, 1 - abs(widthRatio - 0.55) / 0.45);
+        heightScore = max(0, 1 - abs(heightRatio - 0.58) / 0.40);
+        densityScore = min(1, density / 0.42);
+        componentScore = min(1, componentCount / 4);
+        edgePenalty = 0.10 * double(x1 == 1 || x2 == imageWidth);
+        score = 0.34 * componentScore + 0.24 * widthScore + 0.20 * heightScore + ...
+            0.22 * densityScore - edgePenalty;
+
+        if score > bestScore
+            bestScore = score;
+            bestBox = [x1 y1 runWidth runHeight];
+        end
+    end
+
+    if isempty(bestBox)
         return;
     end
 
-    trimmedImage = rowImage(:, startColumn:endColumn, :);
+    paddingX = max(1, round(0.04 * imageWidth));
+    paddingY = max(1, round(0.08 * imageHeight));
+    x1 = max(1, bestBox(1) - paddingX);
+    y1 = max(1, bestBox(2) - paddingY);
+    x2 = min(imageWidth, bestBox(1) + bestBox(3) - 1 + paddingX);
+    y2 = min(imageHeight, bestBox(2) + bestBox(4) - 1 + paddingY);
+    cropBox = [x1 y1 max(2, x2 - x1 + 1) max(2, y2 - y1 + 1)];
+end
+
+function mergedRuns = localMergeRuns(runs, maxGap)
+    mergedRuns = runs;
+    if size(runs, 1) <= 1
+        return;
+    end
+
+    mergedRuns = runs(1, :);
+    for i = 2:size(runs, 1)
+        gap = runs(i, 1) - mergedRuns(end, 2) - 1;
+        if gap <= maxGap
+            mergedRuns(end, 2) = runs(i, 2);
+        else
+            mergedRuns(end + 1, :) = runs(i, :); %#ok<AGROW>
+        end
+    end
 end
 
 function rowImages = localUpscaleRowImages(rowImages, config)
