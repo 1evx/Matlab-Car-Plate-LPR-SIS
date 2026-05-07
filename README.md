@@ -1,6 +1,6 @@
 # Car Plate Recognise System
 
-MATLAB starter project for a License Plate Recognition (LPR) and State Identification System (SIS) focused on Malaysian vehicle registrations. The scaffold is organized for group coursework: modular pipeline code, a runnable GUI, dataset conventions, tests, experiments, and submission assets.
+MATLAB starter project for a License Plate Recognition (LPR) and State Identification System (SIS) focused on Malaysian vehicle registrations. The scaffold is organized for group coursework: rules-based ocr pipeline code, a runnable GUI, dataset conventions, tests, experiments, and submission assets.
 
 ## Project Goals
 
