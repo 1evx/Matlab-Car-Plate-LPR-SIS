@@ -172,11 +172,7 @@ function [candidateRecords, mappedMask] = localGenerateDarkCandidates( ...
     roiImage = imcrop(scaledGray, roiBox);
 
     if ~isempty(roiImage)
-        darkPct = 42;
-        if isfield(config.detection, "darkRoiPercentile")
-            darkPct = double(config.detection.darkRoiPercentile);
-        end
-        darkThreshold = prctile(double(roiImage(:)), darkPct);
+        darkThreshold = prctile(double(roiImage(:)), 42);
         roiMask = roiImage <= darkThreshold;
         roiMask = imclose(roiMask, strel("rectangle", [5 17]));
         roiMask = imopen(roiMask, strel("rectangle", [3 5]));
@@ -208,12 +204,8 @@ function [candidateRecords, mappedMask] = localGenerateTextClusterCandidates( ..
 
     if ~isempty(roiImage)
         equalizedRoi = adapthisteq(roiImage);
-        binSens = 0.44;
-        if isfield(config.detection, "textClusterBinarizeSensitivity")
-            binSens = double(config.detection.textClusterBinarizeSensitivity);
-        end
         roiMask = imbinarize( ...
-            equalizedRoi, "adaptive", "ForegroundPolarity", polarity, "Sensitivity", binSens);
+            equalizedRoi, "adaptive", "ForegroundPolarity", polarity, "Sensitivity", 0.44);
         roiMask = imopen(roiMask, strel("rectangle", config.detection.textClusterOpenKernel));
         roiMask = imclose(roiMask, strel("rectangle", config.detection.textClusterCloseKernel));
         roiMask = imdilate(roiMask, strel("rectangle", config.detection.textClusterDilateKernel));
@@ -368,7 +360,6 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
     contrastScore = min(plateFeatures.contrastScore, 1);
     characterTextureScore = plateFeatures.characterTextureScore;
     plateContrastScore = plateFeatures.plateContrastScore;
-    focusScore = localSafeFeatureValue(plateFeatures, "focusScore");
     alignmentScore = plateFeatures.componentAlignmentScore;
     textComponentCount = plateFeatures.textComponentCount;
     emptyRegionPenalty = plateFeatures.emptyRegionPenalty;
@@ -419,13 +410,12 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         textureScore = mean([ ...
             localThresholdScore(edgeDensity, 0.04, 0.32) ...
             contrastScore ...
-            characterTextureScore ...
-            focusScore]);
+            characterTextureScore]);
         evidenceScore = mean([ ...
             characterTextureScore ...
             plateContrastScore ...
             profileAlignmentScore]);
-        branchScore = localBranchScore(branchName, scale, config);
+        branchScore = localBranchScore(branchName, scale);
 
         countScore = localTextComponentCountScore(textComponentCount, profileName);
         coverageScore = localTextCoverageScore(candidateMask);
@@ -435,7 +425,6 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         [textBandScore, edgeClipPenalty] = localTextBandCompletenessScore(candidateImage, profileName);
         layoutScore = localLayoutMatchScore(layoutHint, rowCountEstimate, profileName);
         boundaryPenalty = localBoundaryPenalty(bbox, originalImageSize);
-        focusPenalty = localFocusPenalty(focusScore, config);
 
         % Final weighted score calculation
         finalScore = 0.16 * geometryScore + 0.07 * shapeScore + 0.10 * textureScore + ...
@@ -443,7 +432,7 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
             0.10 * countScore + 0.08 * coverageScore + 0.07 * positionScore + ...
             0.08 * spanScore + 0.10 * textBandScore + 0.06 * layoutScore - ...
             0.04 * emptyRegionPenalty - 0.04 * splitPenalty - 0.08 * edgeClipPenalty - ...
-            0.14 * boundaryPenalty - focusPenalty;
+            0.14 * boundaryPenalty;
 
         if finalScore > bestScore
             bestScore = finalScore;
@@ -494,19 +483,13 @@ function [candidateRecord, isValid] = localScoreCandidate( ...
         "textComponentCount", textComponentCount, ...
         "layoutHint", layoutHint, ...
         "rowCountEstimate", rowCountEstimate, ...
-        "focusScore", focusScore, ...
         "emptyRegionPenalty", emptyRegionPenalty, ...
         "scoreBreakdown", bestBreakdown);
 end
 
-function score = localBranchScore(branchName, scale, config)
+function score = localBranchScore(branchName, scale)
     % LOCALBRANCHSCORE Assigns a small bias/confidence score depending on 
     % which detection method generated this candidate. Edge priority is highest.
-    % Optional config.detection.branchAdjustments: containers.Map branchName -> delta.
-
-    if nargin < 3 || isempty(config)
-        config = struct();
-    end
 
     switch string(branchName)
         case "edge_priority"
@@ -520,20 +503,11 @@ function score = localBranchScore(branchName, scale, config)
         case "mser_text"
             base = 0.98;
         otherwise
-            base = 0.82;
+            base = 0.86;
     end
 
     scaleOffset = abs(scale - 1.0);
     score = max(0.70, base - 0.10 * scaleOffset);
-
-    if isfield(config, "detection") && isfield(config.detection, "branchAdjustments")
-        m = config.detection.branchAdjustments;
-        key = char(string(branchName));
-        if isa(m, "containers.Map") && isKey(m, key)
-            score = score + m(key);
-        end
-    end
-    score = max(0.58, min(1.12, score));
 end
 
 function score = localProfileFit(value, target, minValue, maxValue)
@@ -986,7 +960,6 @@ function records = localEmptyCandidateRecords()
         "textComponentCount", {}, ...
         "layoutHint", {}, ...
         "rowCountEstimate", {}, ...
-        "focusScore", {}, ...
         "emptyRegionPenalty", {}, ...
         "scoreBreakdown", {});
 end
@@ -1040,25 +1013,6 @@ function value = localSafeFeatureValue(features, fieldName)
         value = double(features.(fieldName));
     end
     value = max(0, min(1, value));
-end
-
-function penalty = localFocusPenalty(focusScore, config)
-    penalty = 0;
-    if ~isfield(config, "detection")
-        return;
-    end
-    thr = 0.34;
-    if isfield(config.detection, "focusPenaltyThreshold")
-        thr = double(config.detection.focusPenaltyThreshold);
-    end
-    w = 0.11;
-    if isfield(config.detection, "focusPenaltyWeight")
-        w = double(config.detection.focusPenaltyWeight);
-    end
-    if focusScore >= thr
-        return;
-    end
-    penalty = w * max(0, min(1, (thr - focusScore) / max(thr, eps)));
 end
 
 function bbox = localPadBBox(bbox, imageSize, paddingRatio)
